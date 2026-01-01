@@ -1,7 +1,7 @@
 import asyncio
 import trueskill as ts
 from match import MatchType, Match
-from numpy import linalg as np
+import numpy as np
 from team_stats import TeamStats
 from fetch_re import fetch_data
 
@@ -10,13 +10,17 @@ ratings = {}
 stats = []
 
 
-async def ingest_matches(event_id, div_id):
-    teams = await fetch_data(
-        f"https://www.robotevents.com/api/v2/events/{event_id}/divisions/{div_id}/rankings",
-        params={"per_page": 250})
-    matches = await fetch_data(
-        f"https://www.robotevents.com/api/v2/events/{event_id}/divisions/{div_id}/matches",
-        params={"per_page": 250})
+async def process_event(event_id, div_ids):
+    teams_data = [fetch_data(
+        f'https://www.robotevents.com/api/v2/events/{event_id}/divisions/{div_id}/rankings',
+        params={'per_page': 250}) for div_id in div_ids]
+    matches_data = [fetch_data(
+        f'https://www.robotevents.com/api/v2/events/{event_id}/divisions/{div_id}/matches',
+        params={'per_page': 250}) for div_id in div_ids]
+    res = await asyncio.gather(*(teams_data + matches_data))
+
+    teams = [team for teams in res[:len(div_ids)] for team in teams]
+    matches = [match for matches in res[len(div_ids):] for match in matches]
 
     await process_matches(teams, matches)
 
@@ -25,14 +29,16 @@ async def process_matches(teams, matches):
     quals = []
     for data in matches:
         match = Match(data)
-        if match.match_type != MatchType.QUAL:
-            continue
         calc_ts(match)
         quals.append(match)
 
+    if not quals:
+        return
+
     for team in teams:
         t = team['team']
-        stats.append(TeamStats(t['id'], t['name']))
+        if TeamStats(t['id'], t['name']) not in stats:
+            stats.append(TeamStats(t['id'], t['name']))
 
     opr, dpr = calc_ccwm(quals)
     for team_id in opr.keys():
@@ -40,8 +46,14 @@ async def process_matches(teams, matches):
         if stat == -1:
             continue
 
-        stat.opr = opr.get(team_id)
-        stat.dpr = dpr.get(team_id)
+        matches_played = stat.matches_played
+        stat.opr = stat.opr * matches_played + opr.get(team_id)
+        stat.dpr = stat.dpr * matches_played + dpr.get(team_id)
+
+        stat.matches_played += len(quals)
+        stat.opr /= stat.matches_played
+        stat.dpr /= stat.matches_played
+
         stat.ccwm = stat.opr - stat.dpr
 
     leaderboard = sorted(ratings.items(), key=lambda item: env.expose(item[1]),
@@ -105,10 +117,10 @@ def calc_ccwm(matches: list[Match]):
     m_matches = match_teams
     m_matches_t = np.matrix_transpose(match_teams)
 
-    m_opr = np.solve(np.matmul(m_matches_t, m_matches),
-                     np.matmul(m_matches_t, m_scores))
-    m_dpr = np.solve(np.matmul(m_matches_t, m_matches),
-                     np.matmul(m_matches_t, m_opp_scores))
+    m_opr = np.linalg.solve(np.matmul(m_matches_t, m_matches),
+                            np.matmul(m_matches_t, m_scores))
+    m_dpr = np.linalg.solve(np.matmul(m_matches_t, m_matches),
+                            np.matmul(m_matches_t, m_opp_scores))
 
     opr = {t: m_opr[i] for i, t in enumerate(teams)}
     dpr = {t: m_dpr[i] for i, t in enumerate(teams)}
@@ -117,7 +129,7 @@ def calc_ccwm(matches: list[Match]):
 
 
 async def main():
-    await ingest_matches(59926, 1)
+    await process_event(59926, [1])
 
     leaderboard = sorted(stats, key=lambda item: item.ts, reverse=True)
     for t in leaderboard:
