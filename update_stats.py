@@ -1,8 +1,14 @@
 import asyncio
+from os import getenv
+from sqlalchemy import create_engine, text
 from datetime import datetime
 from tournament_stats import process_event, stats
 from event import Event
 from fetch_re import fetch_data
+
+engine = create_engine(
+    f'mssql+pyodbc://{getenv('DB_USER')}:{getenv('DB_PASS')}@{getenv('DB_HOST')}/{getenv("DB_NAME")}?driver=ODBC+Driver+18+for+SQL+Server'
+)
 
 last_updated = datetime(2025, 12, 17)
 
