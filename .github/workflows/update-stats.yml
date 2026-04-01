@@ -1,0 +1,50 @@
+name: update-stats
+
+on:
+  workflow_dispatch:
+    inputs:
+      season_backfill:
+        description: "Optional season id for one-time backfill"
+        required: false
+        type: string
+  schedule:
+    # Weekly on Monday at 06:00 UTC
+    - cron: "0 6 * * 1"
+
+jobs:
+  run-update-stats:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run incremental or backfill update
+        env:
+          RE_TOKENS: ${{ secrets.RE_TOKENS }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DB_USER: ${{ secrets.DB_USER }}
+          DB_PASS: ${{ secrets.DB_PASS }}
+          DB_HOST: ${{ secrets.DB_HOST }}
+          DB_NAME: ${{ secrets.DB_NAME }}
+          RE_SEASON_ID: ${{ secrets.RE_SEASON_ID }}
+          RE_EVENT_START: ${{ secrets.RE_EVENT_START }}
+        run: |
+          if [ -n "${{ inputs.season_backfill }}" ]; then
+            echo "Running manual season backfill for season ${{ inputs.season_backfill }}"
+            python update_stats.py --season-backfill "${{ inputs.season_backfill }}"
+          else
+            echo "Running incremental stats update"
+            python update_stats.py
+          fi
