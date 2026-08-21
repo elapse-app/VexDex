@@ -76,8 +76,7 @@ async def get(url, params, pg, semaphore, request_context, default_backoff, max_
                     backoff = min(delay * 2, max_backoff)
                     continue
 
-                data = await res.json()
-                return data
+                return await res.json()
             except Exception as e:
                 logger.warning("Error fetching page %s: %s", pg, e)
                 await asyncio.sleep(backoff)

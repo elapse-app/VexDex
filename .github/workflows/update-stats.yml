@@ -32,14 +32,14 @@ jobs:
 
       - name: Run incremental or backfill update
         env:
-          RE_TOKENS: ${{ secrets.RE_TOKENS }}
+          VEX_TOKENS: ${{ secrets.VEX_TOKENS }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           DB_USER: ${{ secrets.DB_USER }}
           DB_PASS: ${{ secrets.DB_PASS }}
           DB_HOST: ${{ secrets.DB_HOST }}
           DB_NAME: ${{ secrets.DB_NAME }}
-          RE_SEASON_ID: ${{ secrets.RE_SEASON_ID }}
-          RE_EVENT_START: ${{ secrets.RE_EVENT_START }}
+          VEX_SEASON_ID: ${{ secrets.VEX_SEASON_ID }}
+          VEX_EVENT_START: ${{ secrets.VEX_EVENT_START }}
         run: |
           if [ -n "${{ inputs.season_backfill }}" ]; then
             echo "Running manual season backfill for season ${{ inputs.season_backfill }}"

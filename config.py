@@ -15,10 +15,10 @@ DEFAULT_EVENT_START = datetime(2025, 12, 17)
 
 
 def load_app_config() -> AppConfig:
-    season_raw = getenv("RE_SEASON_ID")
+    season_raw = getenv("VEX_SEASON_ID")
     season_id = int(season_raw) if season_raw else None
 
-    start_raw = getenv("RE_EVENT_START")
+    start_raw = getenv("VEX_EVENT_START")
     event_start = datetime.fromisoformat(start_raw) if start_raw else DEFAULT_EVENT_START
 
     return AppConfig(

@@ -27,3 +27,6 @@ jobs:
 
       - name: Compile check
         run: python -m compileall .
+
+      - name: Unit tests
+        run: pytest -q

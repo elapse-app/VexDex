@@ -6,8 +6,7 @@ import logging
 import numpy as np
 import trueskill as ts
 
-from db import mark_event_processed
-from fetch_re import fetch_data
+from fetch_vex import fetch_data
 from match import Match
 from team_stats import TeamStats
 
@@ -28,14 +27,14 @@ def reset_state() -> None:
 async def process_event(event_id, div_ids):
     teams_data = [
         fetch_data(
-            f"https://www.robotevents.com/api/v2/events/{event_id}/divisions/{div_id}/rankings",
+            f"https://events.vex.com/api/v2/events/{event_id}/divisions/{div_id}/rankings",
             params={"per_page": 250},
         )
         for div_id in div_ids
     ]
     matches_data = [
         fetch_data(
-            f"https://www.robotevents.com/api/v2/events/{event_id}/divisions/{div_id}/matches",
+            f"https://events.vex.com/api/v2/events/{event_id}/divisions/{div_id}/matches",
             params={"per_page": 250},
         )
         for div_id in div_ids
@@ -69,7 +68,7 @@ async def process_matches(teams, matches):
     opr, dpr = calc_ccwm(quals)
     team_match_counts = _count_team_matches(quals)
 
-    for team_id in opr.keys():
+    for team_id in opr:
         stat = stats_by_team.get(team_id)
         if stat is None:
             continue
@@ -100,10 +99,6 @@ async def process_matches(teams, matches):
         stat.ts_rank = i + 1
         stat.ts_mu = rating.mu
         stat.ts_sigma = rating.sigma
-
-
-def save_processed_event(engine, event_id, event_start=None, event_end=None):
-    mark_event_processed(engine, event_id, event_start=event_start, event_end=event_end)
 
 
 def _count_team_matches(matches: list[Match]) -> dict[int, int]:
@@ -148,8 +143,8 @@ def calc_ccwm(matches: list[Match]):
     red_scores = []
     blue_scores = []
 
-    red_match_teams = [{team: 0 for team in teams} for _ in matches]
-    blue_match_teams = [{team: 0 for team in teams} for _ in matches]
+    red_match_teams = [dict.fromkeys(teams, 0) for _ in matches]
+    blue_match_teams = [dict.fromkeys(teams, 0) for _ in matches]
 
     for i in range(len(matches)):
         red_scores.append(matches[i].red_score)

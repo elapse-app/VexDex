@@ -1,10 +1,10 @@
 import itertools
 import os
 
-tokens_str = os.getenv("RE_TOKENS", "")
+tokens_str = os.getenv("VEX_TOKENS", "")
 TOKENS = [token.strip() for token in tokens_str.split(",") if token.strip()]
 if not TOKENS:
-    raise RuntimeError("RE_TOKENS is required and must contain at least one token.")
+    raise RuntimeError("VEX_TOKENS is required and must contain at least one token.")
 
 token_cycle = itertools.cycle(TOKENS)
 

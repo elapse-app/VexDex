@@ -13,13 +13,14 @@ from db import (
     get_last_updated_event_start,
     get_oldest_in_progress_event_start,
     get_processed_event_ids,
+    mark_event_processed,
     start_refresh_run,
     upsert_team_season_stats,
     upsert_team_stats,
 )
 from event import Event
-from fetch_re import fetch_data
-from tournament_stats import process_event, reset_state, save_processed_event, stats
+from fetch_vex import fetch_data
+from tournament_stats import process_event, reset_state, stats
 
 engine = get_engine()
 ensure_schema(engine)
@@ -41,11 +42,11 @@ async def resolve_incremental_season_id(config_season_id: int | None) -> int:
         return config_season_id
 
     seasons_json = await fetch_data(
-        "https://www.robotevents.com/api/v2/seasons",
+        "https://events.vex.com/api/v2/seasons",
         params={"per_page": 250},
     )
     if not isinstance(seasons_json, list) or not seasons_json:
-        raise RuntimeError("Unable to determine latest season from RobotEvents API.")
+        raise RuntimeError("Unable to determine latest season from VEX Events API.")
 
     candidates: list[tuple[datetime, int]] = []
     for season in seasons_json:
@@ -80,11 +81,11 @@ async def resolve_incremental_season_id(config_season_id: int | None) -> int:
 
     if not candidates:
         raise RuntimeError(
-            "RobotEvents seasons payload did not include parseable V5RC season IDs."
+            "VEX Events seasons payload did not include parseable V5RC season IDs."
         )
 
     _, latest_season_id = max(candidates)
-    logger.info("Resolved latest season id as %s from RobotEvents.", latest_season_id)
+    logger.info("Resolved latest season id as %s from VEX Events.", latest_season_id)
     return latest_season_id
 
 
@@ -95,7 +96,7 @@ async def update_events(*, season_id: int | None = None, include_entire_season: 
     elif include_entire_season:
         if config.season_id is None:
             raise RuntimeError(
-                "Manual season backfill requires --season-backfill <season_id> or RE_SEASON_ID."
+                "Manual season backfill requires --season-backfill <season_id> or VEX_SEASON_ID."
             )
         target_season_id = config.season_id
     else:
@@ -135,12 +136,12 @@ async def update_events(*, season_id: int | None = None, include_entire_season: 
             }
 
         events_json = await fetch_data(
-            "https://www.robotevents.com/api/v2/events/",
+            "https://events.vex.com/api/v2/events/",
             params=params,
         )
 
         if not isinstance(events_json, list):
-            raise RuntimeError("Expected event list payload from RobotEvents API.")
+            raise RuntimeError("Expected event list payload from VEX Events API.")
 
         events = []
         for event in events_json:
@@ -165,7 +166,7 @@ async def update_events(*, season_id: int | None = None, include_entire_season: 
         await asyncio.gather(*matches)
 
         for event in events:
-            save_processed_event(engine, event.id, event.start, event.end)
+            mark_event_processed(engine, event.id, event.start, event.end)
 
         upsert_team_stats(engine, stats)
         upsert_team_season_stats(engine, target_season_id, stats)

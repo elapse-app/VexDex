@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from os import getenv
 from typing import TYPE_CHECKING
 
@@ -77,9 +77,7 @@ class TeamStatsRecord(Base):
     unqualed_worlds_skills_global_rank: Mapped[int] = mapped_column(Integer, default=0)
     unqualed_regionals_skills_region_rank: Mapped[int] = mapped_column(Integer, default=0)
 
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime, default=lambda: datetime.now(datetime.UTC)
-    )
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
 
 
 class TeamSeasonStatsRecord(Base):
@@ -134,9 +132,7 @@ class TeamSeasonStatsRecord(Base):
     unqualed_worlds_skills_global_rank: Mapped[int] = mapped_column(Integer, default=0)
     unqualed_regionals_skills_region_rank: Mapped[int] = mapped_column(Integer, default=0)
 
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime, default=lambda: datetime.now(datetime.UTC)
-    )
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
 
 
 class ProcessedEventRecord(Base):
@@ -145,9 +141,7 @@ class ProcessedEventRecord(Base):
     event_id: Mapped[int] = mapped_column(Integer, primary_key=True)
     event_start: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     event_end: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    processed_at: Mapped[datetime] = mapped_column(
-        DateTime, default=lambda: datetime.now(datetime.UTC)
-    )
+    processed_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
 
 
 class DatasetRefreshRunRecord(Base):
@@ -159,9 +153,7 @@ class DatasetRefreshRunRecord(Base):
     events_processed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     teams_upserted: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     error_message: Mapped[str | None] = mapped_column(String(2048), nullable=True)
-    started_at: Mapped[datetime] = mapped_column(
-        DateTime, default=lambda: datetime.now(datetime.UTC)
-    )
+    started_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     dataset_fresh: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
@@ -178,7 +170,8 @@ def get_engine() -> Engine:
 
     if not all([user, password, host, database]):
         raise RuntimeError(
-            "Database connection is not configured. Set DATABASE_URL or all of DB_USER, DB_PASS, DB_HOST, DB_NAME."
+            "Database connection is not configured. "
+            "Set DATABASE_URL or all of DB_USER, DB_PASS, DB_HOST, DB_NAME."
         )
 
     return create_engine(
@@ -209,7 +202,7 @@ def ensure_schema(engine: Engine) -> None:
 
 
 def upsert_team_stats(engine: Engine, stats: list[TeamStats]) -> None:
-    now = datetime.now(datetime.UTC)
+    now = datetime.now(UTC)
     with Session(engine) as session:
         for team in stats:
             session.merge(
@@ -262,7 +255,7 @@ def upsert_team_stats(engine: Engine, stats: list[TeamStats]) -> None:
 
 
 def upsert_team_season_stats(engine: Engine, season_id: int, stats: list[TeamStats]) -> None:
-    now = datetime.now(datetime.UTC)
+    now = datetime.now(UTC)
     with Session(engine) as session:
         for team in stats:
             session.merge(
@@ -327,7 +320,7 @@ def mark_event_processed(
                 event_id=event_id,
                 event_start=event_start,
                 event_end=event_end,
-                processed_at=datetime.now(datetime.UTC),
+                processed_at=datetime.now(UTC),
             )
         )
         session.commit()
@@ -341,18 +334,17 @@ def get_processed_event_ids(engine: Engine) -> set[int]:
 
 def get_last_updated_event_start(engine: Engine) -> datetime | None:
     with Session(engine) as session:
-        row = session.execute(
+        return session.execute(
             select(ProcessedEventRecord.event_start)
             .where(ProcessedEventRecord.event_start.is_not(None))
             .order_by(ProcessedEventRecord.processed_at.desc())
             .limit(1)
         ).scalar_one_or_none()
-    return row
 
 
 def get_oldest_in_progress_event_start(engine: Engine, now: datetime) -> datetime | None:
     with Session(engine) as session:
-        row = session.execute(
+        return session.execute(
             select(ProcessedEventRecord.event_start)
             .where(ProcessedEventRecord.event_start.is_not(None))
             .where(ProcessedEventRecord.event_end.is_not(None))
@@ -360,7 +352,6 @@ def get_oldest_in_progress_event_start(engine: Engine, now: datetime) -> datetim
             .order_by(ProcessedEventRecord.event_start.asc())
             .limit(1)
         ).scalar_one_or_none()
-    return row
 
 
 def get_in_progress_event_ids(engine: Engine, now: datetime) -> set[int]:
@@ -403,7 +394,7 @@ def complete_refresh_run(
         row.events_processed = events_processed
         row.teams_upserted = teams_upserted
         row.error_message = error_message
-        row.completed_at = datetime.now(datetime.UTC)
+        row.completed_at = datetime.now(UTC)
         row.dataset_fresh = status == "succeeded"
         session.commit()
 

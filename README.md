@@ -1,10 +1,10 @@
 # VexDex
 
-VexDex pulls RobotEvents data, computes team performance metrics (OPR, DPR, CCWM, TrueSkill), and persists results to SQL.
+VexDex pulls VEX Events data, computes team performance metrics (OPR, DPR, CCWM, TrueSkill), and persists results to SQL.
 
 ## Features
 
-- Async RobotEvents ingestion with retry and rate-limit handling.
+- Async VEX Events ingestion with retry and rate-limit handling.
 - Deterministic event processing with processed-event tracking.
 - SQL persistence for team metrics and event checkpoints.
 - CI-ready project structure with lint and compile checks.
@@ -14,14 +14,14 @@ VexDex pulls RobotEvents data, computes team performance metrics (OPR, DPR, CCWM
 - update_stats.py: Main pipeline entrypoint.
 - api.py: FastAPI read API for teams and refresh status.
 - tournament_stats.py: Match processing and rating math.
-- fetch_re.py: RobotEvents API client.
+- fetch_vex.py: VEX Events API client.
 - db.py: SQLAlchemy models and persistence helpers.
 - config.py: Runtime config from environment variables.
 
 ## Requirements
 
 - Python 3.12+
-- Access to RobotEvents API tokens
+- Access to VEX Events API tokens
 - A configured SQL database
 
 Install dependencies:
@@ -36,15 +36,15 @@ Copy .env.example and fill values.
 
 Required:
 
-- RE_TOKENS: Comma-separated RobotEvents bearer tokens.
+- VEX_TOKENS: Comma-separated VEX Events bearer tokens.
 - Database config:
 	- Preferred: DATABASE_URL
 	- Fallback for SQL Server: DB_USER, DB_PASS, DB_HOST, DB_NAME
 
 Optional:
 
-- RE_SEASON_ID: Optional season ID override. If unset, incremental runs use the latest V5RC season from RobotEvents.
-- RE_EVENT_START: ISO datetime lower bound for event fetch (default 2025-12-17T00:00:00).
+- VEX_SEASON_ID: Optional season ID override. If unset, incremental runs use the latest V5RC season from VEX Events.
+- VEX_EVENT_START: ISO datetime lower bound for event fetch (default 2025-12-17T00:00:00).
 
 ## Run Pipeline
 
@@ -62,8 +62,8 @@ Behavior:
 
 - Writes dataset refresh runs to `dataset_refresh_runs` with running/succeeded/failed status.
 - Marks the dataset fresh only when a pipeline run completes successfully.
-- Incremental runs target the latest V5RC season from RobotEvents unless `RE_SEASON_ID` is set.
-- Uses the last processed event start as the next fetch checkpoint (falls back to RE_EVENT_START).
+- Incremental runs target the latest V5RC season from VEX Events unless `VEX_SEASON_ID` is set.
+- Uses the last processed event start as the next fetch checkpoint (falls back to VEX_EVENT_START).
 - Re-fetches events that were previously processed while still in progress.
 - Skips events that are already processed and complete.
 - `--season-backfill` fetches all events in a season (not checkpoint-limited) for manual historical population.
@@ -128,13 +128,13 @@ Behavior:
 
 Required repository secrets:
 
-- `RE_TOKENS`
+- `VEX_TOKENS`
 - `DATABASE_URL` (recommended) or `DB_USER` / `DB_PASS` / `DB_HOST` / `DB_NAME`
 
 Optional repository secrets:
 
-- `RE_SEASON_ID`
-- `RE_EVENT_START`
+- `VEX_SEASON_ID`
+- `VEX_EVENT_START`
 
 ## CI
 
@@ -150,4 +150,12 @@ Run checks locally:
 ```bash
 ruff check .
 python -m compileall .
+pytest -q
+pytest --cov=. --cov-report=term-missing
+RUN_INTEGRATION_TESTS=1 VEX_TOKENS=your_token pytest -q -m integration
 ```
+
+Notes:
+
+- Integration tests make real HTTP calls to VEX Events and are skipped unless `RUN_INTEGRATION_TESTS=1` is set.
+- Keep default CI on unit tests (`pytest -q`) for reliability; run integration tests separately when needed.
