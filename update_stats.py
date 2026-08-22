@@ -1,7 +1,7 @@
 import argparse
 import asyncio
 import logging
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from config import load_app_config
@@ -13,14 +13,16 @@ from db import (
     get_last_updated_event_start,
     get_oldest_in_progress_event_start,
     get_processed_event_ids,
-    mark_event_processed,
+    get_teams_missing_profile,
+    record_event_results,
+    record_team_profiles,
+    refresh_team_season_summary,
     start_refresh_run,
-    upsert_team_season_stats,
-    upsert_team_stats,
 )
 from event import Event
 from fetch_vex import fetch_data
-from tournament_stats import process_event, reset_state, stats
+from team_profile import TeamProfile
+from tournament_stats import fetch_event_data, process_matches, reset_state
 
 engine = get_engine()
 ensure_schema(engine)
@@ -76,7 +78,7 @@ async def resolve_incremental_season_id(config_season_id: int | None) -> int:
 
         season_start = _parse_iso_datetime(season.get("start"))
         season_end = _parse_iso_datetime(season.get("end"))
-        season_marker = season_end or season_start or datetime.min
+        season_marker = season_end or season_start or datetime.min.replace(tzinfo=UTC)
         candidates.append((season_marker, season_id))
 
     if not candidates:
@@ -87,6 +89,31 @@ async def resolve_incremental_season_id(config_season_id: int | None) -> int:
     _, latest_season_id = max(candidates)
     logger.info("Resolved latest season id as %s from VEX Events.", latest_season_id)
     return latest_season_id
+
+
+async def fetch_missing_team_profiles(team_ids: set[int]) -> None:
+    """Fetch /teams/{id} once for any team we haven't already got a profile
+    for. Team identity (name/grade/region) rarely changes, so this is a
+    one-time enrichment per team rather than something refetched every run."""
+    missing = get_teams_missing_profile(engine, team_ids)
+    if not missing:
+        return
+
+    payloads = await asyncio.gather(
+        *(fetch_data(f"https://events.vex.com/api/v2/teams/{team_id}") for team_id in missing),
+        return_exceptions=True,
+    )
+
+    profiles = []
+    for team_id, payload in zip(missing, payloads, strict=True):
+        if isinstance(payload, Exception):
+            logger.warning("Failed to fetch profile for team %s: %s", team_id, payload)
+            continue
+        profiles.append(TeamProfile.from_json(payload))
+
+    if profiles:
+        record_team_profiles(engine, profiles)
+        logger.info("Fetched %s new team profiles.", len(profiles))
 
 
 async def update_events(*, season_id: int | None = None, include_entire_season: bool = False) -> int:
@@ -108,7 +135,7 @@ async def update_events(*, season_id: int | None = None, include_entire_season: 
     teams_upserted = 0
 
     try:
-        now = datetime.now()
+        now = datetime.now(UTC)
         processed_events = get_processed_event_ids(engine)
         in_progress_event_ids = get_in_progress_event_ids(engine, now)
 
@@ -161,24 +188,35 @@ async def update_events(*, season_id: int | None = None, include_entire_season: 
             )
             return 0
 
+        # Chronological order matters: TrueSkill is a running belief that gets
+        # snapshotted per event, so events must be scored in real match order
+        # for that snapshot history to mean anything.
+        events.sort(key=lambda e: e.start)
+
         reset_state()
-        matches = [process_event(event.id, event.divisions_id) for event in events]
-        await asyncio.gather(*matches)
+        fetched = await asyncio.gather(
+            *(fetch_event_data(event.id, event.divisions_id) for event in events)
+        )
 
-        for event in events:
-            mark_event_processed(engine, event.id, event.start, event.end)
+        teams_touched: set[int] = set()
+        for event, (rankings, matches, skills, awards) in zip(events, fetched, strict=True):
+            results = process_matches(rankings, matches, skills, awards)
+            record_event_results(engine, event, results)
+            teams_touched.update(r.team_id for r in results)
 
-        upsert_team_stats(engine, stats)
-        upsert_team_season_stats(engine, target_season_id, stats)
+            leaderboard = sorted(results, key=lambda item: item.ts, reverse=True)
+            for t in leaderboard:
+                print(
+                    f"[{event.sku}] {t.team_num}: matches={t.total_matches}, "
+                    f"opr={t.opr:.2f}, dpr={t.dpr:.2f}, ccwm={t.ccwm:.2f}, "
+                    f"ts={t.ts:.2f}, tsRank={t.ts_rank}, mu={t.ts_mu:.2f}, sigma={t.ts_sigma:.2f}"
+                )
+
+        await fetch_missing_team_profiles(teams_touched)
+        refresh_team_season_summary(engine, target_season_id)
 
         events_processed = len(events)
-        teams_upserted = len(stats)
-
-        leaderboard = sorted(stats, key=lambda item: item.ts, reverse=True)
-        for t in leaderboard:
-            print(
-                f"{t.team_num}: matches={t.matches_played}, opr={t.opr:.2f}, dpr={t.dpr:.2f}, ccwm={t.ccwm:.2f}, ts={t.ts:.2f}, tsRank={t.ts_rank}, mu={t.ts_mu:.2f}, sigma={t.ts_sigma:.2f}"
-            )
+        teams_upserted = len(teams_touched)
 
         complete_refresh_run(
             engine,

@@ -6,26 +6,29 @@ import logging
 import numpy as np
 import trueskill as ts
 
+from award import Award
 from fetch_vex import fetch_data
-from match import Match
+from match import Match, MatchType
+from skill import SkillRun
 from team_stats import TeamStats
 
 env = ts.TrueSkill()
 logger = logging.getLogger(__name__)
 
+# TrueSkill is a continuously evolving belief per team, intentionally kept
+# across every event processed in one pipeline run (not reset per event).
 ratings: dict[int, ts.Rating] = {}
-stats_by_team: dict[int, TeamStats] = {}
-stats: list[TeamStats] = []
 
 
 def reset_state() -> None:
     ratings.clear()
-    stats_by_team.clear()
-    stats.clear()
 
 
-async def process_event(event_id, div_ids):
-    teams_data = [
+async def fetch_event_data(event_id, div_ids) -> tuple[list, list, list, list]:
+    """Fetch raw rankings, matches, skills, and awards JSON for an event. Safe
+    to run concurrently across many events — pure I/O, no TrueSkill state
+    touched here. Awards are event-wide (not per-division)."""
+    rankings_data = [
         fetch_data(
             f"https://events.vex.com/api/v2/events/{event_id}/divisions/{div_id}/rankings",
             params={"per_page": 250},
@@ -39,60 +42,120 @@ async def process_event(event_id, div_ids):
         )
         for div_id in div_ids
     ]
-    res = await asyncio.gather(*(teams_data + matches_data))
+    skills_task = fetch_data(
+        f"https://events.vex.com/api/v2/events/{event_id}/skills", params={"per_page": 250}
+    )
+    awards_task = fetch_data(
+        f"https://events.vex.com/api/v2/events/{event_id}/awards", params={"per_page": 250}
+    )
 
-    teams = [team for teams in res[: len(div_ids)] for team in teams]
-    matches = [match for matches in res[len(div_ids) :] for match in matches]
+    res = await asyncio.gather(*(rankings_data + matches_data + [skills_task, awards_task]))
 
-    await process_matches(teams, matches)
+    n = len(div_ids)
+    rankings = [row for page in res[:n] for row in page]
+    matches = [row for page in res[n : 2 * n] for row in page]
+    skills = res[2 * n]
+    awards = res[2 * n + 1]
+    return rankings, matches, skills, awards
 
 
-async def process_matches(teams, matches):
-    quals: list[Match] = []
-    for data in matches:
-        match = Match.from_json(data)
+async def process_event(event_id, div_ids) -> list[TeamStats]:
+    """Fetch and process a single event. For processing many events together,
+    fetch_event_data + process_matches must be run separately so events can be
+    scored in chronological order — see update_stats.py."""
+    rankings, matches, skills, awards = await fetch_event_data(event_id, div_ids)
+    return process_matches(rankings, matches, skills, awards)
+
+
+def process_matches(rankings, matches, skills=(), awards=()) -> list[TeamStats]:
+    """Compute this event's full result set for every team that played:
+    win/loss record (overall, qual, elim), ranking-tiebreaker points,
+    OPR/DPR/CCWM, the post-event TrueSkill snapshot, skills scores, and
+    awards won. Returns one TeamStats per team — a standalone per-event
+    result, not blended with any other event.
+
+    Call this in chronological event order when processing multiple events:
+    it mutates the module-global TrueSkill `ratings` state, so out-of-order
+    calls produce a rating history that doesn't match real match order."""
+    parsed_matches = [m for m in (Match.from_json(data) for data in matches) if m.played]
+    for match in parsed_matches:
         calc_ts(match)
-        quals.append(match)
 
-    if not quals:
-        return
+    if not parsed_matches:
+        return []
 
-    for team in teams:
-        t = team["team"]
-        team_id = int(t["id"])
-        if team_id not in stats_by_team:
-            stat = TeamStats(team_id=team_id, team_num=str(t["name"]))
-            stats_by_team[team_id] = stat
-            stats.append(stat)
+    team_nums = {int(row["team"]["id"]): str(row["team"]["name"]) for row in rankings}
 
-    opr, dpr = calc_ccwm(quals)
-    team_match_counts = _count_team_matches(quals)
+    opr, dpr = calc_ccwm(parsed_matches)
+    results: dict[int, TeamStats] = {}
 
-    for team_id in opr:
-        stat = stats_by_team.get(team_id)
+    # Seed from every team that appears in either matches or rankings — a
+    # team can have match results without a final ranking (e.g. withdrew).
+    all_team_ids = set(team_nums)
+    for match in parsed_matches:
+        all_team_ids.update(match.red_teams)
+        all_team_ids.update(match.blue_teams)
+    for team_id in all_team_ids:
+        results[team_id] = TeamStats(team_id=team_id, team_num=team_nums.get(team_id, str(team_id)))
+
+    # Qualification win/loss/draw and matches-played come straight from the
+    # rankings payload — it's the authoritative record. Replaying qual match
+    # scores ourselves is NOT equivalent: a disqualification or other referee
+    # ruling can flip the official result without changing the raw score
+    # (confirmed against live data — a team's score-implied qual record was
+    # 3-3, but the authoritative rankings record for them was 1-5).
+    for row in rankings:
+        team_id = int(row["team"]["id"])
+        stat = results.get(team_id)
         if stat is None:
             continue
+        stat.qual_wins = int(row.get("wins", 0))
+        stat.qual_losses = int(row.get("losses", 0))
+        stat.qual_draws = int(row.get("ties", 0))
+        stat.qual_matches = stat.qual_wins + stat.qual_losses + stat.qual_draws
+        stat.wp = int(row.get("wp", 0))
+        stat.ap = int(row.get("ap", 0))
+        stat.sp = int(row.get("sp", 0))
+        stat.average_match_score = float(row.get("average_points", 0.0))
+        stat.high_score = int(row.get("high_score", 0))
 
-        previous = stat.matches_played
-        current = team_match_counts.get(team_id, 0)
-        if current <= 0:
-            continue
+    # Eliminations have no equivalent authoritative summary endpoint, so this
+    # is the only available source — the same DQ/ruling caveat above applies,
+    # just with no way to detect or correct it here.
+    _tally_elim_records(results, parsed_matches)
 
-        stat.opr = stat.opr * previous + float(opr.get(team_id, 0.0)) * current
-        stat.dpr = stat.dpr * previous + float(dpr.get(team_id, 0.0)) * current
-        stat.matches_played = previous + current
+    for stat in results.values():
+        stat.total_matches = stat.qual_matches + stat.elim_matches
+        stat.total_wins = stat.qual_wins + stat.elim_wins
+        stat.total_losses = stat.qual_losses + stat.elim_losses
+        stat.total_draws = stat.qual_draws + stat.elim_draws
 
-        if stat.matches_played == 0:
-            continue
-
-        stat.opr /= stat.matches_played
-        stat.dpr /= stat.matches_played
-
+    for team_id, stat in results.items():
+        stat.opr = float(opr.get(team_id, 0.0))
+        stat.dpr = float(dpr.get(team_id, 0.0))
         stat.ccwm = stat.opr - stat.dpr
+
+    for skill_payload in skills:
+        run = SkillRun.from_json(skill_payload)
+        stat = results.get(run.team_id)
+        if stat is None:
+            continue
+        if run.skill_type == "driver":
+            stat.skills_driver = run.score
+        elif run.skill_type == "programming":
+            stat.skills_prog = run.score
+
+    for award_payload in awards:
+        award = Award.from_json(award_payload)
+        for team_id in award.team_ids:
+            stat = results.get(team_id)
+            if stat is None:
+                continue
+            stat.awards.append((award.title, award.qualifications))
 
     leaderboard = sorted(ratings.items(), key=lambda item: env.expose(item[1]), reverse=True)
     for i, (team_id, rating) in enumerate(leaderboard):
-        stat = stats_by_team.get(team_id)
+        stat = results.get(team_id)
         if stat is None:
             continue
         stat.ts = env.expose(rating)
@@ -100,13 +163,34 @@ async def process_matches(teams, matches):
         stat.ts_mu = rating.mu
         stat.ts_sigma = rating.sigma
 
+    return list(results.values())
 
-def _count_team_matches(matches: list[Match]) -> dict[int, int]:
-    counts: dict[int, int] = {}
+
+def _tally_elim_records(results: dict[int, TeamStats], matches: list[Match]) -> None:
+    """Fill in elim win-loss-draw records by replaying each elimination
+    match's alliance scores — there's no rankings-style authoritative summary
+    for eliminations, so this is a best-effort inference from the score."""
     for match in matches:
-        for team_id in match.red_teams + match.blue_teams:
-            counts[team_id] = counts.get(team_id, 0) + 1
-    return counts
+        if match.match_type != MatchType.ELIM:
+            continue
+
+        for team_id, my_score, opp_score in (
+            (match.red_teams[0], match.red_score, match.blue_score),
+            (match.red_teams[1], match.red_score, match.blue_score),
+            (match.blue_teams[0], match.blue_score, match.red_score),
+            (match.blue_teams[1], match.blue_score, match.red_score),
+        ):
+            stat = results.get(team_id)
+            if stat is None:
+                continue
+
+            stat.elim_matches += 1
+            if my_score > opp_score:
+                stat.elim_wins += 1
+            elif my_score < opp_score:
+                stat.elim_losses += 1
+            else:
+                stat.elim_draws += 1
 
 
 def calc_ts(match):
@@ -178,17 +262,3 @@ def calc_ccwm(matches: list[Match]):
     dpr = {t: m_dpr[i] for i, t in enumerate(teams)}
 
     return opr, dpr
-
-
-async def main():
-    await process_event(59926, [1])
-
-    leaderboard = sorted(stats, key=lambda item: item.ts, reverse=True)
-    for t in leaderboard:
-        print(
-            f"{t.team_num}: opr={t.opr:.2f}, dpr={t.dpr:.2f}, ccwm={t.ccwm:.2f}, ts={t.ts:.2f}, tsRank={t.ts_rank}, mu={t.ts_mu:.2f}, sigma={t.ts_sigma:.2f}"
-        )
-
-
-if __name__ == "__main__":
-    asyncio.run(main())

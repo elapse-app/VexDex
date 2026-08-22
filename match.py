@@ -23,6 +23,7 @@ class Match:
     blue_teams: list[int]
     red_score: int
     blue_score: int
+    played: bool
 
     @staticmethod
     def from_json(payload: dict[str, Any]) -> "Match":
@@ -41,4 +42,9 @@ class Match:
             ],
             red_score=int(payload["alliances"][0]["score"]),
             blue_score=int(payload["alliances"][1]["score"]),
+            # A scheduled match that hasn't happened yet still appears here
+            # with score 0-0 — "started" is null until the match actually
+            # runs. (The API's own "scored" field is not a reliable signal:
+            # it's false even on matches with real, final scores.)
+            played=payload.get("started") is not None,
         )

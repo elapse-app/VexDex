@@ -11,10 +11,11 @@ from sqlalchemy.orm import Session
 
 from db import (
     DatasetRefreshRunRecord,
-    TeamSeasonStatsRecord,
-    TeamStatsRecord,
+    TeamRecord,
+    TeamSeasonSummaryRecord,
     ensure_schema,
     get_engine,
+    get_latest_season_id,
 )
 
 engine = get_engine()
@@ -27,21 +28,57 @@ app = FastAPI(
 )
 
 
-class TeamStatsResponse(BaseModel):
-    season_id: int | None = None
+class TeamSeasonResponse(BaseModel):
+    season_id: int
     team_id: int
     team_num: str
-    team_name: str | None
-    grade: str
-    region: str | None
+    team_name: str | None = None
+    grade: str | None = None
+    region: str | None = None
+
+    events_count: int
     matches_played: int
-    opr: float
-    dpr: float
-    ccwm: float
-    ts: float
-    ts_rank: int
+
+    total_wins: int
+    total_losses: int
+    total_draws: int
+    total_winrate: float
+    qual_wins: int
+    qual_losses: int
+    qual_draws: int
+    qual_winrate: float
+    elim_wins: int
+    elim_losses: int
+    elim_draws: int
+    elim_winrate: float
+
+    avg_ap: float
+    avg_wp: float
+    avg_awp: float
+
+    opr_avg: float
+    opr_best: float
+    dpr_avg: float
+    dpr_best: float
+    ccwm_avg: float
+    ccwm_best: float
+
     ts_mu: float
     ts_sigma: float
+    ts_exposed: float
+    ts_rank: int
+
+    skills_driver: int | None
+    skills_prog: int | None
+    skills_total: int | None
+    skills_global_rank: int | None
+    skills_region_rank: int | None
+    unqualed_worlds_skills_global_rank: int | None
+    unqualed_regionals_skills_region_rank: int | None
+
+    qualed_worlds: bool
+    qualed_regionals: bool
+
     updated_at: datetime
 
 
@@ -49,7 +86,7 @@ class TeamLeaderboardResponse(BaseModel):
     total: int
     limit: int
     offset: int
-    items: list[TeamStatsResponse]
+    items: list[TeamSeasonResponse]
 
 
 class RefreshRunResponse(BaseModel):
@@ -84,22 +121,50 @@ def get_db() -> Iterator[Session]:
 DbSession = Annotated[Session, Depends(get_db)]
 
 
-def _to_team_response(row: TeamStatsRecord, season_id: int | None = None) -> TeamStatsResponse:
-    return TeamStatsResponse(
-        season_id=season_id,
+def _to_team_response(row: TeamSeasonSummaryRecord, team: TeamRecord | None) -> TeamSeasonResponse:
+    return TeamSeasonResponse(
+        season_id=row.season_id,
         team_id=row.team_id,
         team_num=row.team_num,
-        team_name=row.team_name,
-        grade=row.grade,
-        region=row.region,
+        team_name=team.team_name if team else None,
+        grade=team.grade if team else None,
+        region=team.region if team else None,
+        events_count=row.events_count,
         matches_played=row.matches_played,
-        opr=row.opr,
-        dpr=row.dpr,
-        ccwm=row.ccwm,
-        ts=row.ts,
-        ts_rank=row.ts_rank,
+        total_wins=row.total_wins,
+        total_losses=row.total_losses,
+        total_draws=row.total_draws,
+        total_winrate=row.total_winrate,
+        qual_wins=row.qual_wins,
+        qual_losses=row.qual_losses,
+        qual_draws=row.qual_draws,
+        qual_winrate=row.qual_winrate,
+        elim_wins=row.elim_wins,
+        elim_losses=row.elim_losses,
+        elim_draws=row.elim_draws,
+        elim_winrate=row.elim_winrate,
+        avg_ap=row.avg_ap,
+        avg_wp=row.avg_wp,
+        avg_awp=row.avg_awp,
+        opr_avg=row.opr_avg,
+        opr_best=row.opr_best,
+        dpr_avg=row.dpr_avg,
+        dpr_best=row.dpr_best,
+        ccwm_avg=row.ccwm_avg,
+        ccwm_best=row.ccwm_best,
         ts_mu=row.ts_mu,
         ts_sigma=row.ts_sigma,
+        ts_exposed=row.ts_exposed,
+        ts_rank=row.ts_rank,
+        skills_driver=row.skills_driver,
+        skills_prog=row.skills_prog,
+        skills_total=row.skills_total,
+        skills_global_rank=row.skills_global_rank,
+        skills_region_rank=row.skills_region_rank,
+        unqualed_worlds_skills_global_rank=row.unqualed_worlds_skills_global_rank,
+        unqualed_regionals_skills_region_rank=row.unqualed_regionals_skills_region_rank,
+        qualed_worlds=row.qualed_worlds,
+        qualed_regionals=row.qualed_regionals,
         updated_at=row.updated_at,
     )
 
@@ -118,6 +183,13 @@ def _to_refresh_run_response(row: DatasetRefreshRunRecord) -> RefreshRunResponse
     )
 
 
+def _require_latest_season_id(db: DbSession) -> int:
+    season_id = get_latest_season_id(db.get_bind())
+    if season_id is None:
+        raise HTTPException(status_code=404, detail="No season data available yet")
+    return season_id
+
+
 @app.get("/api/v1/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -129,51 +201,29 @@ def list_current_teams(
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
 ) -> TeamLeaderboardResponse:
-    total = db.execute(select(func.count()).select_from(TeamStatsRecord)).scalar_one()
-
-    rows = db.execute(
-        select(TeamStatsRecord)
-        .order_by(
-            TeamStatsRecord.ts_rank.asc(),
-            desc(TeamStatsRecord.ts),
-            TeamStatsRecord.team_num.asc(),
-        )
-        .offset(offset)
-        .limit(limit)
-    ).scalars()
-
-    items = [_to_team_response(row, season_id=None) for row in rows]
-    return TeamLeaderboardResponse(total=total, limit=limit, offset=offset, items=items)
+    return list_teams_for_season(_require_latest_season_id(db), db, limit=limit, offset=offset)
 
 
-@app.get("/api/v1/teams/{team_id}", response_model=TeamStatsResponse)
-def get_current_team_by_id(team_id: int, db: DbSession) -> TeamStatsResponse:
-    row = db.get(TeamStatsRecord, team_id)
-    if row is None:
-        raise HTTPException(status_code=404, detail="Team not found")
-    return _to_team_response(row, season_id=None)
+@app.get("/api/v1/teams/{team_id}", response_model=TeamSeasonResponse)
+def get_current_team_by_id(team_id: int, db: DbSession) -> TeamSeasonResponse:
+    return get_team_for_season_by_id(_require_latest_season_id(db), team_id, db)
 
 
-@app.get("/api/v1/teams/by-number/{team_num}", response_model=TeamStatsResponse)
-def get_current_team_by_number(team_num: str, db: DbSession) -> TeamStatsResponse:
-    row = db.execute(
-        select(TeamStatsRecord).where(TeamStatsRecord.team_num == team_num)
-    ).scalar_one_or_none()
-    if row is None:
-        raise HTTPException(status_code=404, detail="Team not found")
-    return _to_team_response(row, season_id=None)
+@app.get("/api/v1/teams/by-number/{team_num}", response_model=TeamSeasonResponse)
+def get_current_team_by_number(team_num: str, db: DbSession) -> TeamSeasonResponse:
+    return get_team_for_season_by_number(_require_latest_season_id(db), team_num, db)
 
 
 @app.get("/api/v1/seasons", response_model=list[SeasonSummaryResponse])
 def list_historical_seasons(db: DbSession) -> list[SeasonSummaryResponse]:
     rows = db.execute(
         select(
-            TeamSeasonStatsRecord.season_id,
+            TeamSeasonSummaryRecord.season_id,
             func.count().label("teams"),
-            func.max(TeamSeasonStatsRecord.updated_at).label("last_updated"),
+            func.max(TeamSeasonSummaryRecord.updated_at).label("last_updated"),
         )
-        .group_by(TeamSeasonStatsRecord.season_id)
-        .order_by(TeamSeasonStatsRecord.season_id.desc())
+        .group_by(TeamSeasonSummaryRecord.season_id)
+        .order_by(TeamSeasonSummaryRecord.season_id.desc())
     ).all()
 
     return [
@@ -195,55 +245,60 @@ def list_teams_for_season(
 ) -> TeamLeaderboardResponse:
     total = db.execute(
         select(func.count())
-        .select_from(TeamSeasonStatsRecord)
-        .where(TeamSeasonStatsRecord.season_id == season_id)
+        .select_from(TeamSeasonSummaryRecord)
+        .where(TeamSeasonSummaryRecord.season_id == season_id)
     ).scalar_one()
 
     rows = db.execute(
-        select(TeamSeasonStatsRecord)
-        .where(TeamSeasonStatsRecord.season_id == season_id)
+        select(TeamSeasonSummaryRecord, TeamRecord)
+        .join(TeamRecord, TeamRecord.team_id == TeamSeasonSummaryRecord.team_id)
+        .where(TeamSeasonSummaryRecord.season_id == season_id)
         .order_by(
-            TeamSeasonStatsRecord.ts_rank.asc(),
-            desc(TeamSeasonStatsRecord.ts),
-            TeamSeasonStatsRecord.team_num.asc(),
+            TeamSeasonSummaryRecord.ts_rank.asc(),
+            desc(TeamSeasonSummaryRecord.ts_exposed),
+            TeamSeasonSummaryRecord.team_num.asc(),
         )
         .offset(offset)
         .limit(limit)
-    ).scalars()
+    ).all()
 
-    items = [_to_team_response(row, season_id=season_id) for row in rows]
+    items = [_to_team_response(row, team) for row, team in rows]
     return TeamLeaderboardResponse(total=total, limit=limit, offset=offset, items=items)
 
 
-@app.get("/api/v1/seasons/{season_id}/teams/{team_id}", response_model=TeamStatsResponse)
-def get_team_for_season_by_id(season_id: int, team_id: int, db: DbSession) -> TeamStatsResponse:
+@app.get("/api/v1/seasons/{season_id}/teams/{team_id}", response_model=TeamSeasonResponse)
+def get_team_for_season_by_id(season_id: int, team_id: int, db: DbSession) -> TeamSeasonResponse:
     row = db.execute(
-        select(TeamSeasonStatsRecord)
-        .where(TeamSeasonStatsRecord.season_id == season_id)
-        .where(TeamSeasonStatsRecord.team_id == team_id)
-    ).scalar_one_or_none()
+        select(TeamSeasonSummaryRecord, TeamRecord)
+        .join(TeamRecord, TeamRecord.team_id == TeamSeasonSummaryRecord.team_id)
+        .where(TeamSeasonSummaryRecord.season_id == season_id)
+        .where(TeamSeasonSummaryRecord.team_id == team_id)
+    ).one_or_none()
     if row is None:
         raise HTTPException(status_code=404, detail="Team not found for this season")
-    return _to_team_response(row, season_id=season_id)
+    summary, team = row
+    return _to_team_response(summary, team)
 
 
 @app.get(
     "/api/v1/seasons/{season_id}/teams/by-number/{team_num}",
-    response_model=TeamStatsResponse,
+    response_model=TeamSeasonResponse,
 )
 def get_team_for_season_by_number(
     season_id: int,
     team_num: str,
     db: DbSession,
-) -> TeamStatsResponse:
+) -> TeamSeasonResponse:
     row = db.execute(
-        select(TeamSeasonStatsRecord)
-        .where(TeamSeasonStatsRecord.season_id == season_id)
-        .where(TeamSeasonStatsRecord.team_num == team_num)
-    ).scalar_one_or_none()
+        select(TeamSeasonSummaryRecord, TeamRecord)
+        .join(TeamRecord, TeamRecord.team_id == TeamSeasonSummaryRecord.team_id)
+        .where(TeamSeasonSummaryRecord.season_id == season_id)
+        .where(TeamSeasonSummaryRecord.team_num == team_num)
+    ).one_or_none()
     if row is None:
         raise HTTPException(status_code=404, detail="Team not found for this season")
-    return _to_team_response(row, season_id=season_id)
+    summary, team = row
+    return _to_team_response(summary, team)
 
 
 @app.get("/api/v1/refresh-runs/latest", response_model=RefreshRunResponse)

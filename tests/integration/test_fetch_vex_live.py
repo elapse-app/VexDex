@@ -120,11 +120,11 @@ def test_live_calculations_process_event_produces_metrics(monkeypatch):
     ts_module = _reload_tournament_stats_with_env(monkeypatch)
     ts_module.reset_state()
 
-    asyncio.run(ts_module.process_event(event_id, [division_id]))
+    results = asyncio.run(ts_module.process_event(event_id, [division_id]))
 
-    assert ts_module.stats
+    assert results
 
-    teams_with_matches = [team for team in ts_module.stats if team.matches_played > 0]
+    teams_with_matches = [team for team in results if team.matches_played > 0]
     assert teams_with_matches
 
     for team in teams_with_matches:
@@ -148,9 +148,9 @@ def test_live_calculations_process_matches_rank_consistency(monkeypatch):
     ts_module = _reload_tournament_stats_with_env(monkeypatch)
     ts_module.reset_state()
 
-    asyncio.run(ts_module.process_matches(teams, matches))
+    results = ts_module.process_matches(teams, matches)
 
-    ranked = [team for team in ts_module.stats if team.ts_rank > 0]
+    ranked = [team for team in results if team.ts_rank > 0]
     assert ranked
 
     observed_ranks = sorted(team.ts_rank for team in ranked)

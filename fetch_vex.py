@@ -69,27 +69,29 @@ async def get(url, params, pg, semaphore, request_context, default_backoff, max_
                         "Authorization": f"Bearer {token}",
                     },
                 )
-
-                err, delay = await handle_error(res, pg, backoff)
-                if err:
-                    await asyncio.sleep(delay)
-                    backoff = min(delay * 2, max_backoff)
-                    continue
-
-                return await res.json()
             except Exception as e:
                 logger.warning("Error fetching page %s: %s", pg, e)
                 await asyncio.sleep(backoff)
                 backoff = min(2 * backoff, max_backoff)
+                continue
 
+            if res.status == 429:
+                retry_after = int(res.headers.get("retry-after", backoff))
+                print(f"Rate Limited: Retrying page {pg} after {retry_after}s", file=sys.stderr)
+                await asyncio.sleep(retry_after)
+                backoff = min(retry_after * 2, max_backoff)
+                continue
 
-async def handle_error(res, pg, backoff):
-    if res.status == 429:
-        retry_after = int(res.headers.get("retry-after", backoff))
-        print(f"Rate Limited: Retrying page {pg} after {retry_after}s", file=sys.stderr)
-        return True, retry_after
-    if res.status >= 400:
-        logger.warning("HTTP error %s on page %s", res.status, pg)
-        return True, backoff
+            if 500 <= res.status < 600:
+                logger.warning("Server error %s on page %s, retrying", res.status, pg)
+                await asyncio.sleep(backoff)
+                backoff = min(2 * backoff, max_backoff)
+                continue
 
-    return False, 0
+            if res.status >= 400:
+                # Client errors (404, 401, ...) won't fix themselves on retry —
+                # failing fast beats retrying forever with no way to succeed.
+                body = await res.text()
+                raise RuntimeError(f"HTTP {res.status} fetching {url} (page {pg}): {body[:200]}")
+
+            return await res.json()

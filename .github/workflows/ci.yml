@@ -8,6 +8,19 @@ on:
 jobs:
   quality:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: vexdex_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -28,5 +41,10 @@ jobs:
       - name: Compile check
         run: python -m compileall .
 
-      - name: Unit tests
+      - name: Unit tests (sqlite)
         run: pytest -q
+
+      - name: Database tests (postgres)
+        env:
+          TEST_DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/vexdex_ci
+        run: pytest -q tests/test_db_pipeline.py

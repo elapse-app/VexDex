@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from os import getenv
 
 
@@ -11,7 +11,7 @@ class AppConfig:
     event_start: datetime
 
 
-DEFAULT_EVENT_START = datetime(2025, 12, 17)
+DEFAULT_EVENT_START = datetime(2025, 12, 17, tzinfo=UTC)
 
 
 def load_app_config() -> AppConfig:
@@ -19,7 +19,14 @@ def load_app_config() -> AppConfig:
     season_id = int(season_raw) if season_raw else None
 
     start_raw = getenv("VEX_EVENT_START")
-    event_start = datetime.fromisoformat(start_raw) if start_raw else DEFAULT_EVENT_START
+    if start_raw:
+        event_start = datetime.fromisoformat(start_raw)
+        # The VEX Events API returns offset-aware timestamps; a naive override
+        # here would break comparisons against them, so assume UTC if unspecified.
+        if event_start.tzinfo is None:
+            event_start = event_start.replace(tzinfo=UTC)
+    else:
+        event_start = DEFAULT_EVENT_START
 
     return AppConfig(
         season_id=season_id,

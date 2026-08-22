@@ -1,28 +1,40 @@
 # VexDex
 
-VexDex pulls VEX Events data, computes team performance metrics (OPR, DPR, CCWM, TrueSkill), and persists results to SQL.
+VexDex pulls VEX Events data (matches, rankings, skills, awards, team profiles), computes advanced team performance metrics (OPR, DPR, CCWM, TrueSkill, win/loss records, ranking-tiebreaker averages, skills rankings, qualification tracking), and persists results to Postgres.
 
 ## Features
 
 - Async VEX Events ingestion with retry and rate-limit handling.
 - Deterministic event processing with processed-event tracking.
-- SQL persistence for team metrics and event checkpoints.
+- Win/loss record (overall, qualification-only, elimination-only), with qualification results trusted from VEX's authoritative rankings data rather than inferred from raw scores (a disqualification or other ruling can flip a match's official result without changing its score).
+- Ranking-tiebreaker averages: autonomous points (AP), win points (WP), and an estimated autonomous win point (AWP) rate, derived from the official VRC/V5RC point formula (2 WP/win, 1 WP/tie, +1 WP per AWP).
+- Skills scores (driver + programming) and season-wide skills rankings — globally, by region, and again excluding teams that already hold a qualifying award ("unqualed" rank).
+- World/regional qualification tracking from event awards data.
+- Postgres persistence for team metrics and event checkpoints.
 - CI-ready project structure with lint and compile checks.
 
 ## Project Structure
 
 - update_stats.py: Main pipeline entrypoint.
 - api.py: FastAPI read API for teams and refresh status.
-- tournament_stats.py: Match processing and rating math.
+- tournament_stats.py: Match/rankings/skills/awards processing and rating math.
 - fetch_vex.py: VEX Events API client.
 - db.py: SQLAlchemy models and persistence helpers.
 - config.py: Runtime config from environment variables.
+- event.py / match.py / skill.py / award.py / team_profile.py: raw API payload parsing.
+
+## Data Model
+
+- `teams` / `events`: identity tables. `teams.team_name`/`grade`/`region` come from a one-time `/teams/{id}` profile fetch per team, not refetched once known.
+- `team_event_results`: one immutable row per team per event — win/loss record (total/qual/elim), AP/WP/AWP, OPR/DPR/CCWM, a TrueSkill snapshot, skills scores, and that event's qualification flags. Never updated after insert — this is the source of truth.
+- `team_season_summary`: derived from `team_event_results` (+ `teams` for region). Season win/loss totals, averaged/weighted AP/WP/AWP, OPR/DPR/CCWM averages and bests, the team's latest TrueSkill state, season-best skills score with global/region/unqualed ranks, and season qualification flags. Safe to drop and rebuild from the fact table at any time.
+- `dataset_refresh_runs`: audit log of pipeline runs.
 
 ## Requirements
 
 - Python 3.12+
 - Access to VEX Events API tokens
-- A configured SQL database
+- A Postgres database
 
 Install dependencies:
 
@@ -37,9 +49,9 @@ Copy .env.example and fill values.
 Required:
 
 - VEX_TOKENS: Comma-separated VEX Events bearer tokens.
-- Database config:
-	- Preferred: DATABASE_URL
-	- Fallback for SQL Server: DB_USER, DB_PASS, DB_HOST, DB_NAME
+- Database config (Postgres):
+	- Preferred: DATABASE_URL, e.g. `postgresql+psycopg://user:pass@host/dbname`
+	- Fallback: DB_USER, DB_PASS, DB_HOST, DB_NAME
 
 Optional:
 
@@ -67,8 +79,10 @@ Behavior:
 - Re-fetches events that were previously processed while still in progress.
 - Skips events that are already processed and complete.
 - `--season-backfill` fetches all events in a season (not checkpoint-limited) for manual historical population.
-- Computes metrics for new events.
-- Upserts team rows into team_stats.
+- Events are always scored in chronological order (by event start), regardless of the order the API returns them — TrueSkill is a running belief that only makes sense processed in real match order.
+- Ignores scheduled-but-not-yet-played matches (`started` is null) — they show up in the API with a placeholder 0-0 score and must not feed OPR/DPR/TrueSkill/win-loss.
+- Fetches a `/teams/{id}` profile once per team the first time it's seen (name/grade/region), not on every run.
+- Writes one immutable row per team per event into `team_event_results`, then rebuilds `team_season_summary` (win/loss totals, AP/WP/AWP, OPR/DPR/CCWM averages and bests, the team's most recent TrueSkill snapshot, season-best skills score with global/region/unqualed ranks, and qualification flags) from those rows.
 
 ## Run API
 
@@ -95,6 +109,14 @@ Available endpoints:
 - `GET /api/v1/refresh-runs/latest`
 - `GET /api/v1/refresh-runs?limit=50`
 
+## Database
+
+Any Postgres instance works — the app only ever talks to it through a single
+`DATABASE_URL`, so a hobby-tier managed Postgres (Neon, Supabase, Azure
+Database for PostgreSQL, RDS, ...) is a config change, not a code change.
+Avoid provider-specific extensions (e.g. Supabase auth/storage) so the
+database itself stays a portable, standard Postgres instance.
+
 ## Deploy API (Azure App Service)
 
 1. Create an Azure Web App (Linux, Python 3.12).
@@ -105,7 +127,7 @@ gunicorn -k uvicorn.workers.UvicornWorker -w 2 -b 0.0.0.0:$PORT api:app
 ```
 
 3. Set required app settings in Azure:
-	- `DATABASE_URL` (recommended) or `DB_USER` / `DB_PASS` / `DB_HOST` / `DB_NAME`
+	- `DATABASE_URL` (a Postgres connection string, recommended) or `DB_USER` / `DB_PASS` / `DB_HOST` / `DB_NAME`
 4. Add GitHub repository secrets:
 	- `AZURE_WEBAPP_NAME`
 	- `AZURE_WEBAPP_PUBLISH_PROFILE`
@@ -144,6 +166,8 @@ Checks performed:
 
 - Ruff linting
 - Python compile check
+- Unit tests against sqlite (fast, isolated per test)
+- `tests/test_db_pipeline.py` re-run against a real Postgres service container — sqlite silently diverges from Postgres on some things (e.g. it drops tzinfo on `DateTime(timezone=True)` columns on read-back), so the schema/persistence layer is verified against the actual production engine on every push.
 
 Run checks locally:
 
@@ -153,6 +177,9 @@ python -m compileall .
 pytest -q
 pytest --cov=. --cov-report=term-missing
 RUN_INTEGRATION_TESTS=1 VEX_TOKENS=your_token pytest -q -m integration
+
+# optional: also verify against real Postgres instead of sqlite
+TEST_DATABASE_URL=postgresql+psycopg://user:pass@localhost/vexdex_test pytest -q tests/test_db_pipeline.py
 ```
 
 Notes:

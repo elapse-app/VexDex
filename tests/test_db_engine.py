@@ -20,3 +20,17 @@ def test_get_engine_requires_fallback_parts(monkeypatch):
 
     with pytest.raises(RuntimeError, match="Database connection is not configured"):
         db.get_engine()
+
+
+def test_get_engine_fallback_uses_postgres_driver(monkeypatch):
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setenv("DB_USER", "u")
+    monkeypatch.setenv("DB_PASS", "p")
+    monkeypatch.setenv("DB_HOST", "h")
+    monkeypatch.setenv("DB_NAME", "d")
+
+    engine = db.get_engine()
+
+    assert engine.url.drivername == "postgresql+psycopg"
+    assert engine.url.host == "h"
+    assert engine.url.database == "d"
