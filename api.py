@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from db import (
     DatasetRefreshRunRecord,
     EventRecord,
+    TeamAwardRecord,
     TeamEventResultRecord,
     TeamRecord,
     TeamSeasonSummaryRecord,
@@ -144,6 +145,39 @@ class TeamEventTrendResponse(BaseModel):
     team_id: int
     team_num: str
     points: list[TeamEventTrendPoint]
+
+
+class TeamAwardEntry(BaseModel):
+    event_id: int
+    event_sku: str
+    event_name: str
+    event_start: datetime
+    title: str
+    qualifications: list[str]
+
+
+class TeamAwardHistoryResponse(BaseModel):
+    season_id: int
+    team_id: int
+    team_num: str
+    awards: list[TeamAwardEntry]
+
+
+class PickListEntry(BaseModel):
+    team_id: int
+    team_num: str
+    team_name: str | None
+    pick_list_score: float | None
+    percentile_ccwm: float | None
+    ccwm_avg: float
+    skills_total: int | None
+    avg_awp: float
+
+
+class PickListResponse(BaseModel):
+    event_id: int
+    season_id: int
+    items: list[PickListEntry]
 
 
 def get_db() -> Iterator[Session]:
@@ -389,6 +423,84 @@ def get_team_trend(season_id: int, team_id: int, db: DbSession) -> TeamEventTren
         for result, event in rows
     ]
     return TeamEventTrendResponse(season_id=season_id, team_id=team_id, team_num=team_num, points=points)
+
+
+@app.get(
+    "/api/v1/seasons/{season_id}/teams/{team_id}/awards",
+    response_model=TeamAwardHistoryResponse,
+)
+def get_team_award_history(season_id: int, team_id: int, db: DbSession) -> TeamAwardHistoryResponse:
+    """Every award this team has won this season, chronologically — the raw
+    history behind the qualed_worlds/qualed_regionals flags on the summary."""
+    rows = db.execute(
+        select(TeamAwardRecord, EventRecord)
+        .join(EventRecord, EventRecord.event_id == TeamAwardRecord.event_id)
+        .where(TeamAwardRecord.season_id == season_id)
+        .where(TeamAwardRecord.team_id == team_id)
+        .order_by(EventRecord.event_start.asc())
+    ).all()
+
+    team = db.get(TeamRecord, team_id)
+    team_num = team.team_num if team else str(team_id)
+
+    awards = [
+        TeamAwardEntry(
+            event_id=event.event_id,
+            event_sku=event.sku,
+            event_name=event.name,
+            event_start=event.event_start,
+            title=award.title,
+            qualifications=award.qualifications,
+        )
+        for award, event in rows
+    ]
+    return TeamAwardHistoryResponse(season_id=season_id, team_id=team_id, team_num=team_num, awards=awards)
+
+
+@app.get("/api/v1/events/{event_id}/pick-list", response_model=PickListResponse)
+def get_event_pick_list(
+    event_id: int,
+    db: DbSession,
+    exclude: list[int] = Query(default_factory=list),  # noqa: B008 — default_factory avoids the mutable-default issue this rule checks for
+    limit: int = Query(default=20, ge=1, le=100),
+) -> PickListResponse:
+    """Alliance pick-list for the teams actually registered at this event,
+    ranked by season pick_list_score. Pass `exclude` (repeatable) for your own
+    team and anyone already picked — you can't pick a team twice."""
+    event = db.get(EventRecord, event_id)
+    if event is None:
+        raise HTTPException(status_code=404, detail="Event not found")
+
+    rows = db.execute(
+        select(TeamSeasonSummaryRecord, TeamRecord)
+        .join(TeamRecord, TeamRecord.team_id == TeamSeasonSummaryRecord.team_id)
+        .where(TeamSeasonSummaryRecord.season_id == event.season_id)
+        .where(
+            TeamSeasonSummaryRecord.team_id.in_(
+                select(TeamEventResultRecord.team_id).where(
+                    TeamEventResultRecord.event_id == event_id
+                )
+            )
+        )
+        .where(TeamSeasonSummaryRecord.team_id.notin_(exclude))
+        .order_by(desc(TeamSeasonSummaryRecord.pick_list_score).nulls_last())
+        .limit(limit)
+    ).all()
+
+    items = [
+        PickListEntry(
+            team_id=summary.team_id,
+            team_num=summary.team_num,
+            team_name=team.team_name if team else None,
+            pick_list_score=summary.pick_list_score,
+            percentile_ccwm=summary.percentile_ccwm,
+            ccwm_avg=summary.ccwm_avg,
+            skills_total=summary.skills_total,
+            avg_awp=summary.avg_awp,
+        )
+        for summary, team in rows
+    ]
+    return PickListResponse(event_id=event_id, season_id=event.season_id, items=items)
 
 
 @app.get("/api/v1/refresh-runs/latest", response_model=RefreshRunResponse)

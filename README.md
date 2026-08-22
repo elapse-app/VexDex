@@ -31,6 +31,7 @@ VexDex pulls VEX Events data (matches, rankings, skills, awards, team profiles),
 - `teams` / `events`: identity tables. `teams.team_name`/`grade`/`region` come from a one-time `/teams/{id}` profile fetch per team, not refetched once known.
 - `team_event_results`: one immutable row per team per event — win/loss record (total/qual/elim), AP/WP/AWP, OPR/DPR/CCWM, strength of schedule, a field-strength z-score, a TrueSkill snapshot, skills scores, and that event's qualification flags. Never updated after insert — this is the source of truth.
 - `team_season_summary`: derived from `team_event_results` (+ `teams` for region). Season win/loss totals, averaged/weighted AP/WP/AWP, OPR/DPR/CCWM/SOS averages and bests, the team's latest TrueSkill state, season-best skills score with global/region/unqualed ranks, season qualification flags, season percentile ranks (CCWM, TrueSkill), and a pick-list composite score. Safe to drop and rebuild from the fact table at any time.
+- `team_awards`: one row per award a team won at an event (title + qualifications) — the actual history behind the qualed_worlds/qualed_regionals flags.
 - `dataset_refresh_runs`: audit log of pipeline runs.
 
 ## Requirements
@@ -110,6 +111,8 @@ Available endpoints:
 - `GET /api/v1/seasons/{season_id}/teams/{team_id}`
 - `GET /api/v1/seasons/{season_id}/teams/by-number/{team_num}`
 - `GET /api/v1/seasons/{season_id}/teams/{team_id}/trend` — every event this team competed in this season, chronologically, with OPR/DPR/CCWM/SOS/TrueSkill at each point
+- `GET /api/v1/seasons/{season_id}/teams/{team_id}/awards` — every award this team has won this season, chronologically
+- `GET /api/v1/events/{event_id}/pick-list?exclude=<team_id>&limit=20` — alliance pick-list for the teams actually registered at this event, ranked by pick_list_score; `exclude` is repeatable (your own team, anyone already picked)
 - `GET /api/v1/refresh-runs/latest`
 - `GET /api/v1/refresh-runs?limit=50`
 
@@ -120,6 +123,9 @@ Any Postgres instance works — the app only ever talks to it through a single
 Database for PostgreSQL, RDS, ...) is a config change, not a code change.
 Avoid provider-specific extensions (e.g. Supabase auth/storage) so the
 database itself stays a portable, standard Postgres instance.
+
+Optional Terraform for provisioning the DB (Neon) and API host (Azure App
+Service) as code: see [`infra/`](infra/).
 
 ## Deploy API (Azure App Service)
 

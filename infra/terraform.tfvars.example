@@ -1,0 +1,10 @@
+# Copy this to terraform.tfvars (gitignored) and fill in real values.
+# Never commit terraform.tfvars — it will contain a real token.
+
+vex_tokens = "token_1,token_2"
+
+# Optional overrides — defaults are in variables.tf.
+# environment            = "prod"
+# neon_region_id         = "aws-us-east-1"
+# azure_location         = "eastus"
+# azure_app_service_sku  = "B1"

@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from os import getenv
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Boolean, DateTime, Float, Integer, String, create_engine, select
+from sqlalchemy import JSON, Boolean, DateTime, Float, Integer, String, create_engine, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
@@ -115,6 +115,23 @@ class TeamEventResultRecord(Base):
     qualed_worlds: Mapped[bool] = mapped_column(Boolean, default=False)
     qualed_regionals: Mapped[bool] = mapped_column(Boolean, default=False)
 
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
+    )
+
+
+class TeamAwardRecord(Base):
+    """One row per award a team won at an event. qualed_worlds/qualed_regionals
+    on team_event_results are derived from this — this table is the actual
+    history (what award, at what event)."""
+
+    __tablename__ = "team_awards"
+
+    event_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    team_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    title: Mapped[str] = mapped_column(String(255), primary_key=True)
+    season_id: Mapped[int] = mapped_column(Integer)
+    qualifications: Mapped[list[str]] = mapped_column(JSON, default=list)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC)
     )
@@ -306,6 +323,17 @@ def record_event_results(engine: Engine, event: Event, results: list[TeamStats])
                     created_at=now,
                 )
             )
+            for title, qualifications in team.awards:
+                session.merge(
+                    TeamAwardRecord(
+                        event_id=event.id,
+                        team_id=team.team_id,
+                        title=title,
+                        season_id=event.season_id,
+                        qualifications=qualifications,
+                        created_at=now,
+                    )
+                )
 
         session.commit()
 
