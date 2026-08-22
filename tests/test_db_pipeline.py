@@ -195,6 +195,65 @@ def test_refresh_team_season_summary_computes_skills_and_qualification_ranks(eng
     assert rows[1].unqualed_worlds_skills_global_rank is None
 
 
+def test_percentiles_pure_function():
+    # Best value -> 100th percentile, worst -> 0th, ties share a percentile.
+    pcts = db._percentiles({1: 30.0, 2: 20.0, 3: 20.0, 4: 10.0})
+
+    assert pcts[1] == pytest.approx(100.0)
+    assert pcts[4] == pytest.approx(0.0)
+    assert pcts[2] == pytest.approx(pcts[3])
+    assert 0.0 < pcts[2] < 100.0
+
+
+def test_percentiles_single_team_is_100():
+    assert db._percentiles({1: 5.0}) == {1: 100.0}
+
+
+def test_refresh_team_season_summary_computes_percentiles_and_pick_list(engine):
+    season_id = 190
+    # Three teams, distinct CCWM, only team 1 has skills data.
+    db.record_event_results(
+        engine,
+        _event(event_id=1, season_id=season_id),
+        [
+            TeamStats(team_id=1, team_num="1A", total_matches=1, qual_matches=1,
+                      opr=30.0, dpr=0.0, ccwm=30.0, wp=4, qual_wins=2,
+                      skills_driver=20, skills_prog=10),
+            TeamStats(team_id=2, team_num="2A", total_matches=1, qual_matches=1,
+                      opr=20.0, dpr=0.0, ccwm=20.0, wp=4, qual_wins=2),
+            TeamStats(team_id=3, team_num="3A", total_matches=1, qual_matches=1,
+                      opr=10.0, dpr=0.0, ccwm=10.0, wp=4, qual_wins=2),
+        ],
+    )
+
+    db.refresh_team_season_summary(engine, season_id)
+
+    from sqlalchemy.orm import Session
+
+    with Session(engine) as session:
+        rows = {
+            r.team_id: r
+            for r in session.execute(
+                select(db.TeamSeasonSummaryRecord).where(db.TeamSeasonSummaryRecord.season_id == season_id)
+            ).scalars()
+        }
+
+    # Best CCWM -> 100th percentile, worst -> 0th.
+    assert rows[1].percentile_ccwm == pytest.approx(100.0)
+    assert rows[3].percentile_ccwm == pytest.approx(0.0)
+
+    # Team 1 has skills data and the best CCWM/AWP too, so it should have the
+    # highest pick-list score of the three.
+    assert rows[1].pick_list_score > rows[2].pick_list_score > rows[3].pick_list_score
+
+    # Team 2 has no skills data — its score is CCWM+AWP only (weight
+    # redistributed), not penalized to zero for the missing component.
+    expected_team_2 = (
+        db.PICK_LIST_WEIGHTS["ccwm"] + db.PICK_LIST_WEIGHTS["skills"]
+    ) * rows[2].percentile_ccwm + db.PICK_LIST_WEIGHTS["awp"] * 100.0  # tied best AWP
+    assert rows[2].pick_list_score == pytest.approx(expected_team_2)
+
+
 def test_in_progress_event_tracking(engine):
     now = datetime(2026, 1, 10, 12, 0, 0, tzinfo=UTC)
     ongoing = _event(

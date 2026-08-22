@@ -37,6 +37,14 @@ class TeamStats:
     dpr: float = 0.0
     ccwm: float = 0.0
 
+    # Strength of schedule: average OPR of opponents faced at this event,
+    # weighted by how many times each was faced. Field-strength z-score: how
+    # many standard deviations this team's OPR was above/below this event's
+    # field average — makes a small local event and a Worlds-caliber field
+    # comparable, unlike raw OPR.
+    sos: float = 0.0
+    field_strength_z: float = 0.0
+
     ts: float = 0.0
     ts_rank: int = 0
     ts_mu: float = 0.0

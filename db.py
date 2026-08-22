@@ -97,6 +97,12 @@ class TeamEventResultRecord(Base):
     dpr: Mapped[float] = mapped_column(Float, default=0.0)
     ccwm: Mapped[float] = mapped_column(Float, default=0.0)
 
+    # Strength of schedule (avg opponent OPR this event) and field-strength
+    # z-score (this team's OPR vs. this event's field), both computed from
+    # this event's own OPR values so they're comparable across events.
+    sos: Mapped[float] = mapped_column(Float, default=0.0)
+    field_strength_z: Mapped[float] = mapped_column(Float, default=0.0)
+
     ts_mu: Mapped[float] = mapped_column(Float, default=0.0)
     ts_sigma: Mapped[float] = mapped_column(Float, default=0.0)
     ts_exposed: Mapped[float] = mapped_column(Float, default=0.0)
@@ -152,6 +158,20 @@ class TeamSeasonSummaryRecord(Base):
     dpr_best: Mapped[float] = mapped_column(Float, default=0.0)
     ccwm_avg: Mapped[float] = mapped_column(Float, default=0.0)
     ccwm_best: Mapped[float] = mapped_column(Float, default=0.0)
+
+    sos_avg: Mapped[float] = mapped_column(Float, default=0.0)
+    field_strength_z_avg: Mapped[float] = mapped_column(Float, default=0.0)
+
+    # Percentile rank (0-100) within this season: 100 = best. Computed once
+    # every team in the season has been aggregated, so it's stable across a
+    # rebuild as long as the same set of teams goes in.
+    percentile_ccwm: Mapped[float | None] = mapped_column(Float, nullable=True)
+    percentile_ts: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    # v1 alliance pick-list score: 50% CCWM percentile + 30% skills percentile
+    # (neutral 50 if no skills data) + 20% AWP-rate percentile. Weights are a
+    # first-pass judgment call, not derived from data — tune freely.
+    pick_list_score: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     # TrueSkill is a running belief state, not a quantity to average — these
     # are carried over from the team's most recently processed event.
@@ -272,6 +292,8 @@ def record_event_results(engine: Engine, event: Event, results: list[TeamStats])
                     opr=team.opr,
                     dpr=team.dpr,
                     ccwm=team.ccwm,
+                    sos=team.sos,
+                    field_strength_z=team.field_strength_z,
                     ts_mu=team.ts_mu,
                     ts_sigma=team.ts_sigma,
                     ts_exposed=team.ts,
@@ -404,6 +426,8 @@ def refresh_team_season_summary(engine: Engine, season_id: int) -> int:
                 dpr_best=min(r.dpr for r in results),  # lower DPR is better defense
                 ccwm_avg=sum(r.ccwm for r in results) / n,
                 ccwm_best=max(r.ccwm for r in results),
+                sos_avg=sum(r.sos for r in results) / n,
+                field_strength_z_avg=sum(r.field_strength_z for r in results) / n,
                 ts_mu=latest.ts_mu,
                 ts_sigma=latest.ts_sigma,
                 ts_exposed=latest.ts_exposed,
@@ -420,6 +444,7 @@ def refresh_team_season_summary(engine: Engine, season_id: int) -> int:
             regions[team_id] = region
 
         _assign_skills_ranks(summaries, skills_totals, regions)
+        _assign_percentiles_and_pick_list(summaries)
 
         for summary in summaries.values():
             session.merge(summary)
@@ -469,6 +494,65 @@ def _assign_skills_ranks(
         summaries[team_id].unqualed_regionals_skills_region_rank = (
             unqualed_regionals_region_ranks.get(team_id)
         )
+
+
+def _percentiles(values: dict[int, float]) -> dict[int, float]:
+    """0-100 percentile rank within the given team_id -> value map. 100 is
+    the best (highest) value; ties share the same percentile."""
+    n = len(values)
+    if n == 0:
+        return {}
+    if n == 1:
+        return {next(iter(values)): 100.0}
+
+    ordered = sorted(values.items(), key=lambda item: item[1], reverse=True)
+    percentiles: dict[int, float] = {}
+    i = 0
+    while i < n:
+        j = i
+        while j + 1 < n and ordered[j + 1][1] == ordered[i][1]:
+            j += 1
+        # Every team tied at this value gets the percentile of the best
+        # (lowest) rank among them, matching how ties read intuitively.
+        pct = 100.0 * (n - 1 - i) / (n - 1)
+        for k in range(i, j + 1):
+            percentiles[ordered[k][0]] = pct
+        i = j + 1
+    return percentiles
+
+
+PICK_LIST_WEIGHTS = {"ccwm": 0.5, "skills": 0.3, "awp": 0.2}
+
+
+def _assign_percentiles_and_pick_list(summaries: dict[int, TeamSeasonSummaryRecord]) -> None:
+    """Season-wide percentile ranks plus a v1 alliance pick-list composite
+    score. All percentiles are computed across every team summarized this
+    call, so they're only meaningful relative to teams processed together."""
+    ccwm_pct = _percentiles({t: s.ccwm_avg for t, s in summaries.items()})
+    ts_pct = _percentiles({t: s.ts_exposed for t, s in summaries.items()})
+    skills_pct = _percentiles(
+        {t: s.skills_total for t, s in summaries.items() if s.skills_total is not None}
+    )
+    awp_pct = _percentiles({t: s.avg_awp for t, s in summaries.items()})
+
+    for team_id, summary in summaries.items():
+        summary.percentile_ccwm = ccwm_pct.get(team_id)
+        summary.percentile_ts = ts_pct.get(team_id)
+
+        # A team with no skills data isn't penalized for missing data — it's
+        # simply left out of that component (weight redistributed to CCWM).
+        skills_component = skills_pct.get(team_id)
+        if skills_component is None:
+            weight_ccwm = PICK_LIST_WEIGHTS["ccwm"] + PICK_LIST_WEIGHTS["skills"]
+            summary.pick_list_score = (
+                weight_ccwm * ccwm_pct[team_id] + PICK_LIST_WEIGHTS["awp"] * awp_pct[team_id]
+            )
+        else:
+            summary.pick_list_score = (
+                PICK_LIST_WEIGHTS["ccwm"] * ccwm_pct[team_id]
+                + PICK_LIST_WEIGHTS["skills"] * skills_component
+                + PICK_LIST_WEIGHTS["awp"] * awp_pct[team_id]
+            )
 
 
 def get_processed_event_ids(engine: Engine) -> set[int]:

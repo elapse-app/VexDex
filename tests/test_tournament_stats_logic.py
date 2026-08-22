@@ -121,6 +121,12 @@ def test_process_matches_updates_stats_and_trueskill(monkeypatch):
     assert team_1.ts > team_3.ts
     assert team_1.ts_rank < team_3.ts_rank
 
+    # SOS: team 1's only opponents (3, 4) both have OPR 5.0.
+    assert team_1.sos == pytest.approx(5.0)
+    # Field-strength z: field is [10, 10, 5, 5], mean 7.5, stdev 2.5.
+    assert team_1.field_strength_z == pytest.approx(1.0)
+    assert team_3.field_strength_z == pytest.approx(-1.0)
+
     # Win/loss record comes from the rankings payload (authoritative), not
     # replayed from the match score — see test below for why that matters.
     assert team_1.total_wins == 1 and team_1.qual_wins == 1 and team_1.elim_wins == 0
@@ -132,6 +138,26 @@ def test_process_matches_updates_stats_and_trueskill(monkeypatch):
     assert team_1.avg_wp == pytest.approx(2.0)
     # AWP estimate: wp - 2*wins - ties = 2 - 2*1 - 0 = 0 (won without an AWP bonus)
     assert team_1.avg_awp == pytest.approx(0.0)
+
+
+def test_sos_weights_by_how_often_each_opponent_is_faced(monkeypatch):
+    ts_mod = _reload_tournament_stats(monkeypatch)
+    ts_mod.reset_state()
+
+    # Team 1 faces team 3 (OPR 5) once and team 5 (OPR 15) twice, so SOS
+    # should be (5 + 15 + 15) / 3, not a plain average of distinct opponents.
+    rankings = [_ranking_row(t, f"{t}A", wins=1, losses=0) for t in (1, 2, 3, 4, 5, 6)]
+    matches = [
+        _match_payload(1, (1, 2), (3, 4), red_score=20, blue_score=10),
+        _match_payload(2, (1, 2), (5, 6), red_score=20, blue_score=30),
+        _match_payload(3, (1, 2), (5, 6), red_score=20, blue_score=30),
+    ]
+
+    results = {r.team_id: r for r in ts_mod.process_matches(rankings, matches)}
+
+    opr_3, opr_5 = results[3].opr, results[5].opr
+    expected_sos = (opr_3 + 2 * opr_5) / 3
+    assert results[1].sos == pytest.approx(expected_sos)
 
 
 def test_process_matches_trusts_rankings_over_raw_score_for_qual_record(monkeypatch):

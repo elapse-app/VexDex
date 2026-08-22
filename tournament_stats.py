@@ -135,6 +135,8 @@ def process_matches(rankings, matches, skills=(), awards=()) -> list[TeamStats]:
         stat.dpr = float(dpr.get(team_id, 0.0))
         stat.ccwm = stat.opr - stat.dpr
 
+    _compute_schedule_metrics(results, opr, parsed_matches)
+
     for skill_payload in skills:
         run = SkillRun.from_json(skill_payload)
         stat = results.get(run.team_id)
@@ -191,6 +193,38 @@ def _tally_elim_records(results: dict[int, TeamStats], matches: list[Match]) -> 
                 stat.elim_losses += 1
             else:
                 stat.elim_draws += 1
+
+
+def _compute_schedule_metrics(
+    results: dict[int, TeamStats], opr: dict[int, float], matches: list[Match]
+) -> None:
+    """Strength of schedule (average opponent OPR, weighted by how often each
+    opponent was faced) and field-strength z-score (how this team's OPR
+    compares to the rest of the field at this event), both using this event's
+    own OPR values — so they mean the same thing across every event."""
+    if len(opr) > 1:
+        field_oprs = list(opr.values())
+        mean_opr = sum(field_oprs) / len(field_oprs)
+        variance = sum((v - mean_opr) ** 2 for v in field_oprs) / len(field_oprs)
+        stdev_opr = variance**0.5
+    else:
+        mean_opr = next(iter(opr.values()), 0.0)
+        stdev_opr = 0.0
+
+    opponent_oprs: dict[int, list[float]] = {}
+    for match in matches:
+        for team_id, opponents in (
+            (match.red_teams[0], match.blue_teams),
+            (match.red_teams[1], match.blue_teams),
+            (match.blue_teams[0], match.red_teams),
+            (match.blue_teams[1], match.red_teams),
+        ):
+            opponent_oprs.setdefault(team_id, []).extend(opr.get(o, 0.0) for o in opponents)
+
+    for team_id, stat in results.items():
+        faced = opponent_oprs.get(team_id)
+        stat.sos = sum(faced) / len(faced) if faced else 0.0
+        stat.field_strength_z = (stat.opr - mean_opr) / stdev_opr if stdev_opr else 0.0
 
 
 def calc_ts(match):

@@ -11,6 +11,8 @@ from sqlalchemy.orm import Session
 
 from db import (
     DatasetRefreshRunRecord,
+    EventRecord,
+    TeamEventResultRecord,
     TeamRecord,
     TeamSeasonSummaryRecord,
     ensure_schema,
@@ -62,6 +64,12 @@ class TeamSeasonResponse(BaseModel):
     dpr_best: float
     ccwm_avg: float
     ccwm_best: float
+    sos_avg: float
+    field_strength_z_avg: float
+
+    percentile_ccwm: float | None
+    percentile_ts: float | None
+    pick_list_score: float | None
 
     ts_mu: float
     ts_sigma: float
@@ -113,6 +121,31 @@ class SeasonSummaryResponse(BaseModel):
     last_updated: datetime
 
 
+class TeamEventTrendPoint(BaseModel):
+    event_id: int
+    event_sku: str
+    event_name: str
+    event_start: datetime
+    matches_played: int
+    opr: float
+    dpr: float
+    ccwm: float
+    sos: float
+    field_strength_z: float
+    ts_mu: float
+    ts_sigma: float
+    ts_exposed: float
+    ts_rank: int
+    skills_total: int | None
+
+
+class TeamEventTrendResponse(BaseModel):
+    season_id: int
+    team_id: int
+    team_num: str
+    points: list[TeamEventTrendPoint]
+
+
 def get_db() -> Iterator[Session]:
     with Session(engine) as session:
         yield session
@@ -152,6 +185,11 @@ def _to_team_response(row: TeamSeasonSummaryRecord, team: TeamRecord | None) -> 
         dpr_best=row.dpr_best,
         ccwm_avg=row.ccwm_avg,
         ccwm_best=row.ccwm_best,
+        sos_avg=row.sos_avg,
+        field_strength_z_avg=row.field_strength_z_avg,
+        percentile_ccwm=row.percentile_ccwm,
+        percentile_ts=row.percentile_ts,
+        pick_list_score=row.pick_list_score,
         ts_mu=row.ts_mu,
         ts_sigma=row.ts_sigma,
         ts_exposed=row.ts_exposed,
@@ -236,12 +274,23 @@ def list_historical_seasons(db: DbSession) -> list[SeasonSummaryResponse]:
     ]
 
 
+_LEADERBOARD_SORTS = {
+    # default: TrueSkill rank, best first
+    "ts": (TeamSeasonSummaryRecord.ts_rank.asc(), desc(TeamSeasonSummaryRecord.ts_exposed)),
+    # alliance pick-list order — nulls (no data yet) sort last
+    "pick_list": (desc(TeamSeasonSummaryRecord.pick_list_score),),
+    "ccwm": (desc(TeamSeasonSummaryRecord.ccwm_avg),),
+    "opr": (desc(TeamSeasonSummaryRecord.opr_avg),),
+}
+
+
 @app.get("/api/v1/seasons/{season_id}/teams", response_model=TeamLeaderboardResponse)
 def list_teams_for_season(
     season_id: int,
     db: DbSession,
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
+    sort: str = Query(default="ts", pattern="^(ts|pick_list|ccwm|opr)$"),
 ) -> TeamLeaderboardResponse:
     total = db.execute(
         select(func.count())
@@ -253,11 +302,7 @@ def list_teams_for_season(
         select(TeamSeasonSummaryRecord, TeamRecord)
         .join(TeamRecord, TeamRecord.team_id == TeamSeasonSummaryRecord.team_id)
         .where(TeamSeasonSummaryRecord.season_id == season_id)
-        .order_by(
-            TeamSeasonSummaryRecord.ts_rank.asc(),
-            desc(TeamSeasonSummaryRecord.ts_exposed),
-            TeamSeasonSummaryRecord.team_num.asc(),
-        )
+        .order_by(*_LEADERBOARD_SORTS[sort], TeamSeasonSummaryRecord.team_num.asc())
         .offset(offset)
         .limit(limit)
     ).all()
@@ -299,6 +344,51 @@ def get_team_for_season_by_number(
         raise HTTPException(status_code=404, detail="Team not found for this season")
     summary, team = row
     return _to_team_response(summary, team)
+
+
+@app.get(
+    "/api/v1/seasons/{season_id}/teams/{team_id}/trend",
+    response_model=TeamEventTrendResponse,
+)
+def get_team_trend(season_id: int, team_id: int, db: DbSession) -> TeamEventTrendResponse:
+    """Every event this team competed in this season, in chronological order
+    — OPR/DPR/CCWM/TrueSkill/SOS at each point in time, not just the season
+    average. This is the one thing the mutable running-average model this
+    schema replaced could never answer: is this team improving?"""
+    rows = db.execute(
+        select(TeamEventResultRecord, EventRecord)
+        .join(EventRecord, EventRecord.event_id == TeamEventResultRecord.event_id)
+        .where(TeamEventResultRecord.season_id == season_id)
+        .where(TeamEventResultRecord.team_id == team_id)
+        .order_by(EventRecord.event_start.asc())
+    ).all()
+    if not rows:
+        raise HTTPException(status_code=404, detail="No event results for this team in this season")
+
+    team = db.get(TeamRecord, team_id)
+    team_num = team.team_num if team else str(team_id)
+
+    points = [
+        TeamEventTrendPoint(
+            event_id=event.event_id,
+            event_sku=event.sku,
+            event_name=event.name,
+            event_start=event.event_start,
+            matches_played=result.total_matches,
+            opr=result.opr,
+            dpr=result.dpr,
+            ccwm=result.ccwm,
+            sos=result.sos,
+            field_strength_z=result.field_strength_z,
+            ts_mu=result.ts_mu,
+            ts_sigma=result.ts_sigma,
+            ts_exposed=result.ts_exposed,
+            ts_rank=result.ts_rank,
+            skills_total=result.skills_total,
+        )
+        for result, event in rows
+    ]
+    return TeamEventTrendResponse(season_id=season_id, team_id=team_id, team_num=team_num, points=points)
 
 
 @app.get("/api/v1/refresh-runs/latest", response_model=RefreshRunResponse)

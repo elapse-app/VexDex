@@ -10,6 +10,9 @@ VexDex pulls VEX Events data (matches, rankings, skills, awards, team profiles),
 - Ranking-tiebreaker averages: autonomous points (AP), win points (WP), and an estimated autonomous win point (AWP) rate, derived from the official VRC/V5RC point formula (2 WP/win, 1 WP/tie, +1 WP per AWP).
 - Skills scores (driver + programming) and season-wide skills rankings — globally, by region, and again excluding teams that already hold a qualifying award ("unqualed" rank).
 - World/regional qualification tracking from event awards data.
+- Event-by-event rating trend per team (the thing a mutable running average could never answer: is this team improving?).
+- Strength of schedule (average opponent OPR faced) and a field-strength z-score, so a small local event and a Worlds-caliber field are comparable.
+- Season percentile ranks (CCWM, TrueSkill) and a v1 alliance pick-list composite score.
 - Postgres persistence for team metrics and event checkpoints.
 - CI-ready project structure with lint and compile checks.
 
@@ -26,8 +29,8 @@ VexDex pulls VEX Events data (matches, rankings, skills, awards, team profiles),
 ## Data Model
 
 - `teams` / `events`: identity tables. `teams.team_name`/`grade`/`region` come from a one-time `/teams/{id}` profile fetch per team, not refetched once known.
-- `team_event_results`: one immutable row per team per event — win/loss record (total/qual/elim), AP/WP/AWP, OPR/DPR/CCWM, a TrueSkill snapshot, skills scores, and that event's qualification flags. Never updated after insert — this is the source of truth.
-- `team_season_summary`: derived from `team_event_results` (+ `teams` for region). Season win/loss totals, averaged/weighted AP/WP/AWP, OPR/DPR/CCWM averages and bests, the team's latest TrueSkill state, season-best skills score with global/region/unqualed ranks, and season qualification flags. Safe to drop and rebuild from the fact table at any time.
+- `team_event_results`: one immutable row per team per event — win/loss record (total/qual/elim), AP/WP/AWP, OPR/DPR/CCWM, strength of schedule, a field-strength z-score, a TrueSkill snapshot, skills scores, and that event's qualification flags. Never updated after insert — this is the source of truth.
+- `team_season_summary`: derived from `team_event_results` (+ `teams` for region). Season win/loss totals, averaged/weighted AP/WP/AWP, OPR/DPR/CCWM/SOS averages and bests, the team's latest TrueSkill state, season-best skills score with global/region/unqualed ranks, season qualification flags, season percentile ranks (CCWM, TrueSkill), and a pick-list composite score. Safe to drop and rebuild from the fact table at any time.
 - `dataset_refresh_runs`: audit log of pipeline runs.
 
 ## Requirements
@@ -99,13 +102,14 @@ gunicorn -k uvicorn.workers.UvicornWorker -w 2 -b 0.0.0.0:${PORT:-8000} api:app
 Available endpoints:
 
 - `GET /api/v1/health`
-- `GET /api/v1/teams?limit=100&offset=0`
+- `GET /api/v1/teams?limit=100&offset=0` — current (latest) season leaderboard
 - `GET /api/v1/teams/{team_id}`
 - `GET /api/v1/teams/by-number/{team_num}`
 - `GET /api/v1/seasons`
-- `GET /api/v1/seasons/{season_id}/teams?limit=100&offset=0`
+- `GET /api/v1/seasons/{season_id}/teams?limit=100&offset=0&sort=ts` — `sort` is one of `ts` (default), `pick_list`, `ccwm`, `opr`
 - `GET /api/v1/seasons/{season_id}/teams/{team_id}`
 - `GET /api/v1/seasons/{season_id}/teams/by-number/{team_num}`
+- `GET /api/v1/seasons/{season_id}/teams/{team_id}/trend` — every event this team competed in this season, chronologically, with OPR/DPR/CCWM/SOS/TrueSkill at each point
 - `GET /api/v1/refresh-runs/latest`
 - `GET /api/v1/refresh-runs?limit=50`
 
