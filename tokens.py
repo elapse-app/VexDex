@@ -1,6 +1,10 @@
 import itertools
 import os
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 tokens_str = os.getenv("VEX_TOKENS", "")
 TOKENS = [token.strip() for token in tokens_str.split(",") if token.strip()]
 if not TOKENS:

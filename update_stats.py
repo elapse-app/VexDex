@@ -20,6 +20,7 @@ from db import (
     start_refresh_run,
 )
 from event import Event
+from fetch_vex import close as close_fetch_vex
 from fetch_vex import fetch_data
 from team_profile import TeamProfile
 from tournament_stats import fetch_event_data, process_matches, reset_state
@@ -43,6 +44,7 @@ async def resolve_incremental_season_id(config_season_id: int | None) -> int:
     if config_season_id is not None:
         return config_season_id
 
+    logger.debug("Resolving latest season id (no season configured).")
     seasons_json = await fetch_data(
         "https://events.vex.com/api/v2/seasons",
         params={"per_page": 250},
@@ -96,6 +98,10 @@ async def fetch_missing_team_profiles(team_ids: set[int]) -> None:
     for. Team identity (name/grade/region) rarely changes, so this is a
     one-time enrichment per team rather than something refetched every run."""
     missing = get_teams_missing_profile(engine, team_ids)
+    logger.debug(
+        "Team profiles: %s team(s) touched, %s missing a profile.",
+        len(team_ids), len(missing),
+    )
     if not missing:
         return
 
@@ -162,6 +168,11 @@ async def update_events(*, season_id: int | None = None, include_entire_season: 
                 "season": target_season_id,
             }
 
+        logger.debug(
+            "Querying events with params=%s (%s already-processed event(s), %s in-progress).",
+            params, len(processed_events), len(in_progress_event_ids),
+        )
+
         events_json = await fetch_data(
             "https://events.vex.com/api/v2/events/",
             params=params,
@@ -170,12 +181,18 @@ async def update_events(*, season_id: int | None = None, include_entire_season: 
         if not isinstance(events_json, list):
             raise RuntimeError("Expected event list payload from VEX Events API.")
 
+        logger.debug("VEX API returned %s event(s) in range.", len(events_json))
+
         events = []
         for event in events_json:
             parsed_event = Event.from_json(event)
             if parsed_event.id in processed_events and parsed_event.id not in in_progress_event_ids:
                 continue
             events.append(parsed_event)
+
+        logger.debug(
+            "%s event(s) remain after filtering out already-processed events.", len(events)
+        )
 
         if not events:
             logger.info("No new events to process.")
@@ -192,14 +209,26 @@ async def update_events(*, season_id: int | None = None, include_entire_season: 
         # snapshotted per event, so events must be scored in real match order
         # for that snapshot history to mean anything.
         events.sort(key=lambda e: e.start)
+        logger.debug(
+            "Processing order (chronological): %s",
+            [event.sku for event in events],
+        )
 
         reset_state()
+        logger.info("Fetching raw data for %s event(s) concurrently...", len(events))
         fetched = await asyncio.gather(
             *(fetch_event_data(event.id, event.divisions_id) for event in events)
         )
+        logger.debug("Raw data fetched for all %s event(s); scoring in chronological order.", len(events))
 
         teams_touched: set[int] = set()
-        for event, (rankings, matches, skills, awards) in zip(events, fetched, strict=True):
+        for i, (event, (rankings, matches, skills, awards)) in enumerate(
+            zip(events, fetched, strict=True), start=1
+        ):
+            logger.debug(
+                "Scoring event %s/%s: %s (%s ranking row(s), %s match(es), %s skills run(s), %s award(s))",
+                i, len(events), event.sku, len(rankings), len(matches), len(skills), len(awards),
+            )
             results = process_matches(rankings, matches, skills, awards)
             record_event_results(engine, event, results)
             teams_touched.update(r.team_id for r in results)
@@ -247,20 +276,29 @@ async def main():
         type=int,
         help="Manually compute stats for all events in the given season.",
     )
+    parser.add_argument(
+        "-v", "--verbose",
+        action="store_true",
+        help="Enable debug logging: per-request tracing (tokens, pages, backoff/retry "
+             "timing), event filtering, and per-event fetch/scoring progress.",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
-        level=logging.INFO,
+        level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s - %(message)s",
     )
-    if args.season_backfill is not None:
-        await update_events(
-            season_id=args.season_backfill,
-            include_entire_season=True,
-        )
-        return
+    try:
+        if args.season_backfill is not None:
+            await update_events(
+                season_id=args.season_backfill,
+                include_entire_season=True,
+            )
+            return
 
-    await update_events()
+        await update_events()
+    finally:
+        await close_fetch_vex()
 
 
 if __name__ == "__main__":
