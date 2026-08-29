@@ -225,6 +225,29 @@ def test_process_matches_ignores_unplayed_placeholder_matches(monkeypatch):
     assert results[1].total_wins == 1
 
 
+def test_process_matches_skips_malformed_match_instead_of_raising(monkeypatch):
+    # Real data caught this too: an unpaired elimination bracket slot can
+    # come back with an empty alliance `teams` list. process_matches must
+    # skip it rather than crash the whole event's processing on it.
+    ts_mod = _reload_tournament_stats(monkeypatch)
+    ts_mod.reset_state()
+
+    rankings = [_ranking_row(t, f"{t}A", wins=1, losses=0, wp=2, ap=6) for t in (1, 2)] + [
+        _ranking_row(t, f"{t}A", wins=0, losses=1) for t in (3, 4)
+    ]
+    malformed = _match_payload(2, (1, 2), (3, 4), red_score=0, blue_score=0)
+    malformed["alliances"][0]["teams"] = []
+    matches = [
+        _match_payload(1, (1, 2), (3, 4), red_score=20, blue_score=10, played=True),
+        malformed,
+    ]
+
+    results = {r.team_id: r for r in ts_mod.process_matches(rankings, matches)}
+
+    assert results[1].opr == pytest.approx(10.0)  # only the well-formed match feeds OPR
+    assert results[1].total_wins == 1
+
+
 def test_process_matches_attaches_skills_and_awards(monkeypatch):
     ts_mod = _reload_tournament_stats(monkeypatch)
     ts_mod.reset_state()

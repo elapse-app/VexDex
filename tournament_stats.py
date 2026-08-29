@@ -77,7 +77,7 @@ def process_matches(rankings, matches, skills=(), awards=()) -> list[TeamStats]:
     Call this in chronological event order when processing multiple events:
     it mutates the module-global TrueSkill `ratings` state, so out-of-order
     calls produce a rating history that doesn't match real match order."""
-    parsed_matches = [m for m in (Match.from_json(data) for data in matches) if m.played]
+    parsed_matches = [m for m in (Match.from_json(data) for data in matches) if m is not None and m.played]
     for match in parsed_matches:
         calc_ts(match)
 

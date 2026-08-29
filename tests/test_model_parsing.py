@@ -88,6 +88,44 @@ def test_match_from_json_unplayed_when_not_started():
     assert Match.from_json(payload).played is False
 
 
+def test_match_from_json_skips_incomplete_alliance():
+    # Observed on live data: an elimination bracket slot that hasn't been
+    # paired with a team yet, or a partially-seeded match, can show up with
+    # an empty `teams` list rather than 2 entries. Every downstream OPR/DPR/
+    # TrueSkill computation hard-assumes exactly 2 teams per alliance, so
+    # this can't be scored — from_json should skip it (return None) instead
+    # of raising, so one bad match doesn't take down the whole event.
+    payload = {
+        "id": 9,
+        "matchnum": 3,
+        "instance": 1,
+        "round": 2,
+        "started": "2026-01-10T09:18:03-05:00",
+        "alliances": [
+            {"teams": [], "score": 0},
+            {"teams": [{"team": {"id": 3}}, {"team": {"id": 4}}], "score": 0},
+        ],
+    }
+
+    assert Match.from_json(payload) is None
+
+
+def test_match_from_json_skips_missing_team_id():
+    payload = {
+        "id": 10,
+        "matchnum": 4,
+        "instance": 1,
+        "round": 2,
+        "started": "2026-01-10T09:18:03-05:00",
+        "alliances": [
+            {"teams": [{"team": None}, {"team": {"id": 2}}], "score": 0},
+            {"teams": [{"team": {"id": 3}}, {"team": {"id": 4}}], "score": 0},
+        ],
+    }
+
+    assert Match.from_json(payload) is None
+
+
 def test_skill_run_treats_null_attempts_as_zero():
     # Live API: attempts is null (not 0) when a team registered for skills
     # but never actually ran — score/rank are still real integers.
