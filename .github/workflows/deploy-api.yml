@@ -31,7 +31,7 @@ jobs:
           pip install -r requirements.txt
 
       - name: Deploy to Fly.io
-        uses: superfly/flyctl-actions/setup-flytcl@master
+        uses: superfly/flyctl-actions/setup-flyctl@master
       - run: flyctl deploy --remote-only
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
