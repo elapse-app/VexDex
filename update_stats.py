@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import logging
+from collections.abc import Iterator, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
@@ -18,6 +19,7 @@ from db import (
     record_team_profiles,
     refresh_team_season_summary,
     start_refresh_run,
+    update_refresh_run_progress,
 )
 from event import Event
 from fetch_vex import close as close_fetch_vex
@@ -29,6 +31,11 @@ engine = get_engine()
 ensure_schema(engine)
 
 logger = logging.getLogger(__name__)
+
+
+def _batched(seq: Sequence[Any], size: int) -> Iterator[Sequence[Any]]:
+    for i in range(0, len(seq), size):
+        yield seq[i : i + size]
 
 
 def _parse_iso_datetime(value: Any) -> datetime | None:
@@ -215,37 +222,67 @@ async def update_events(*, season_id: int | None = None, include_entire_season: 
         )
 
         reset_state()
-        logger.info("Fetching raw data for %s event(s) concurrently...", len(events))
-        fetched = await asyncio.gather(
-            *(fetch_event_data(event.id, event.divisions_id) for event in events)
-        )
-        logger.debug("Raw data fetched for all %s event(s); scoring in chronological order.", len(events))
 
+        # Processed in batches rather than one giant fetch-everything-then-write-
+        # everything pass: this smooths the request burst (only one batch's
+        # worth of events fan out requests at a time, instead of every new
+        # event in the whole run at once) and checkpoints progress to the DB
+        # after each batch, so a run that dies partway (e.g. a CI timeout,
+        # which can't be caught as a Python exception) has already persisted
+        # whatever batches completed rather than losing the entire run.
+        #
+        # `events` is sorted chronologically above and `_batched` yields
+        # consecutive slices of it, with both the inner zip and the outer
+        # batch loop strictly sequential — so TrueSkill scoring order across
+        # batch boundaries is identical to scoring the whole run in one pass.
         teams_touched: set[int] = set()
-        for i, (event, (rankings, matches, skills, awards)) in enumerate(
-            zip(events, fetched, strict=True), start=1
-        ):
-            logger.debug(
-                "Scoring event %s/%s: %s (%s ranking row(s), %s match(es), %s skills run(s), %s award(s))",
-                i, len(events), event.sku, len(rankings), len(matches), len(skills), len(awards),
+        events_processed = 0
+        num_batches = (len(events) + config.event_batch_size - 1) // config.event_batch_size
+
+        for batch_num, batch in enumerate(_batched(events, config.event_batch_size), start=1):
+            logger.info(
+                "Fetching batch %s/%s (%s event(s)) concurrently...",
+                batch_num, num_batches, len(batch),
             )
-            results = process_matches(rankings, matches, skills, awards)
-            record_event_results(engine, event, results)
-            teams_touched.update(r.team_id for r in results)
+            fetched = await asyncio.gather(
+                *(fetch_event_data(event.id, event.divisions_id) for event in batch)
+            )
 
-            leaderboard = sorted(results, key=lambda item: item.ts, reverse=True)
-            for t in leaderboard:
-                print(
-                    f"[{event.sku}] {t.team_num}: matches={t.total_matches}, "
-                    f"opr={t.opr:.2f}, dpr={t.dpr:.2f}, ccwm={t.ccwm:.2f}, "
-                    f"ts={t.ts:.2f}, tsRank={t.ts_rank}, mu={t.ts_mu:.2f}, sigma={t.ts_sigma:.2f}"
+            batch_teams: set[int] = set()
+            for event, (rankings, matches, skills, awards) in zip(batch, fetched, strict=True):
+                logger.debug(
+                    "Scoring event: %s (%s ranking row(s), %s match(es), %s skills run(s), %s award(s))",
+                    event.sku, len(rankings), len(matches), len(skills), len(awards),
                 )
+                results = process_matches(rankings, matches, skills, awards)
+                record_event_results(engine, event, results)
+                batch_teams.update(r.team_id for r in results)
 
-        await fetch_missing_team_profiles(teams_touched)
+                leaderboard = sorted(results, key=lambda item: item.ts, reverse=True)
+                for t in leaderboard:
+                    print(
+                        f"[{event.sku}] {t.team_num}: matches={t.total_matches}, "
+                        f"opr={t.opr:.2f}, dpr={t.dpr:.2f}, ccwm={t.ccwm:.2f}, "
+                        f"ts={t.ts:.2f}, tsRank={t.ts_rank}, mu={t.ts_mu:.2f}, sigma={t.ts_sigma:.2f}"
+                    )
+
+            teams_touched.update(batch_teams)
+            await fetch_missing_team_profiles(batch_teams)
+
+            events_processed += len(batch)
+            teams_upserted = len(teams_touched)
+            update_refresh_run_progress(
+                engine,
+                run_id=run_id,
+                events_processed=events_processed,
+                teams_upserted=teams_upserted,
+            )
+            logger.info(
+                "Batch %s/%s complete: %s/%s event(s) processed so far.",
+                batch_num, num_batches, events_processed, len(events),
+            )
+
         refresh_team_season_summary(engine, target_season_id)
-
-        events_processed = len(events)
-        teams_upserted = len(teams_touched)
 
         complete_refresh_run(
             engine,

@@ -9,9 +9,11 @@ from os import getenv
 class AppConfig:
     season_id: int | None
     event_start: datetime
+    event_batch_size: int
 
 
 DEFAULT_EVENT_START = datetime(2025, 12, 17, tzinfo=UTC)
+DEFAULT_EVENT_BATCH_SIZE = 5
 
 
 def load_app_config() -> AppConfig:
@@ -28,7 +30,13 @@ def load_app_config() -> AppConfig:
     else:
         event_start = DEFAULT_EVENT_START
 
+    batch_raw = getenv("VEX_EVENT_BATCH_SIZE")
+    event_batch_size = int(batch_raw) if batch_raw else DEFAULT_EVENT_BATCH_SIZE
+    if event_batch_size <= 0:
+        raise RuntimeError("VEX_EVENT_BATCH_SIZE must be a positive integer.")
+
     return AppConfig(
         season_id=season_id,
         event_start=event_start,
+        event_batch_size=event_batch_size,
     )

@@ -634,6 +634,23 @@ def start_refresh_run(engine: Engine, season_id: int) -> int:
         return int(row.run_id)
 
 
+def update_refresh_run_progress(
+    engine: Engine, run_id: int, events_processed: int, teams_upserted: int
+) -> None:
+    """Best-effort progress heartbeat for a still-running run. Leaves status
+    and completed_at untouched so a run that gets hard-killed (e.g. a CI
+    timeout, which can't be caught as a Python exception) still shows
+    accurate partial progress instead of looking like it made none. Call
+    once per completed batch."""
+    with Session(engine) as session:
+        row = session.get(DatasetRefreshRunRecord, run_id)
+        if row is None:
+            return
+        row.events_processed = events_processed
+        row.teams_upserted = teams_upserted
+        session.commit()
+
+
 def complete_refresh_run(
     engine: Engine,
     run_id: int,

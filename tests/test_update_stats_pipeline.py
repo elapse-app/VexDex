@@ -129,6 +129,87 @@ def test_update_events_processes_out_of_order_events_chronologically(modules, mo
     assert run.teams_upserted == 4
 
 
+def test_update_events_batches_and_checkpoints_on_mid_run_failure(modules, monkeypatch):
+    update_stats, tournament_stats, db = modules
+    monkeypatch.setenv("VEX_EVENT_BATCH_SIZE", "2")
+
+    teams = [
+        {"team": {"id": 1, "name": "100A"}},
+        {"team": {"id": 2, "name": "100B"}},
+        {"team": {"id": 3, "name": "200A"}},
+        {"team": {"id": 4, "name": "200B"}},
+    ]
+
+    events = [
+        _event_payload(i, f"RE-V5RC-26-000{i}", f"2026-01-0{i}T00:00:00-05:00",
+                        f"2026-01-0{i}T12:00:00-05:00", 190)
+        for i in range(1, 5)
+    ]
+    matches = {
+        1: [_match_payload(1, (1, 2), (3, 4), 30, 10)],
+        2: [_match_payload(2, (1, 2), (3, 4), 10, 30)],
+        4: [_match_payload(4, (1, 2), (3, 4), 30, 10)],
+    }
+
+    async def fake_fetch_data(url, params=None, **kwargs):
+        if "/seasons" in url:
+            return [{"id": 190, "program": {"id": 1}, "start": "2026-01-01T00:00:00-05:00",
+                      "end": "2026-06-01T00:00:00-05:00"}]
+        if url.endswith("/events/"):
+            return events
+        if "/teams/" in url:
+            team_id = int(url.rsplit("/", 1)[-1])
+            return {"id": team_id, "number": f"{team_id}A", "team_name": None,
+                    "grade": "High School", "location": {"region": "CA"}}
+        raise AssertionError(f"unexpected fetch_data call: {url}")
+
+    async def fake_fetch_event_data(event_id, div_ids):
+        if event_id == 3:
+            # Simulates a rate-limit storm that eventually exhausts retries
+            # partway through the run — batches 1 and 2 (events 1 and 2)
+            # should already be persisted by the time this raises.
+            raise RuntimeError("simulated rate-limit exhaustion")
+        return teams, matches[event_id], [], []
+
+    monkeypatch.setattr(update_stats, "fetch_data", fake_fetch_data)
+    monkeypatch.setattr(update_stats, "fetch_event_data", fake_fetch_event_data)
+
+    import asyncio
+
+    with pytest.raises(RuntimeError, match="simulated rate-limit exhaustion"):
+        asyncio.run(update_stats.update_events(season_id=190))
+
+    # Batch 1 (events 1 and 2) completed and was checkpointed before batch 2
+    # (which contains the failing event 3) blew up.
+    assert db.get_processed_event_ids(update_stats.engine) == {1, 2}
+
+    # Chronological TrueSkill ordering held across the batch boundary: team
+    # 1's persisted mu after event 2 matches processing events 1 then 2
+    # sequentially in one pass.
+    tournament_stats.reset_state()
+    tournament_stats.process_matches(teams, matches[1])
+    expected_team_1 = tournament_stats.process_matches(teams, matches[2])
+    expected_mu = next(r.ts_mu for r in expected_team_1 if r.team_id == 1)
+
+    from sqlalchemy.orm import Session
+
+    with Session(update_stats.engine) as session:
+        row = session.get(db.TeamEventResultRecord, {"event_id": 2, "team_id": 1})
+    assert row.ts_mu == pytest.approx(expected_mu)
+
+    # The refresh run reflects partial progress, not zero, and is marked failed.
+    from sqlalchemy import select
+
+    with Session(update_stats.engine) as session:
+        run = session.execute(
+            select(db.DatasetRefreshRunRecord).order_by(db.DatasetRefreshRunRecord.run_id.desc())
+        ).scalars().first()
+    assert run.status == "failed"
+    assert run.events_processed == 2
+    assert run.teams_upserted == 4
+    assert "simulated rate-limit exhaustion" in run.error_message
+
+
 def test_update_events_skips_already_processed_events(modules, monkeypatch):
     update_stats, tournament_stats, db = modules
 

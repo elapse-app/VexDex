@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 import sys
 from typing import Any
 
 from playwright.async_api import APIRequestContext, Playwright, async_playwright
 
+import rate_limiter
 import tokens
 
 logger = logging.getLogger(__name__)
@@ -22,6 +24,13 @@ _init_lock = asyncio.Lock()
 # only bounds pagination within that one call's own endpoint, not how many
 # fetch_data() calls run concurrently across different events.
 _REQUEST_SEMAPHORE = asyncio.Semaphore(15)
+
+
+def _jittered_sleep(seconds: float) -> float:
+    """Adds upward-only jitter so concurrent coroutines that got rate-limited
+    at the same moment don't all retry in lockstep. Never returns less than
+    `seconds` — the server-mandated (or backed-off) wait is always honored."""
+    return seconds * random.uniform(1.0, 1.3)
 
 
 async def _get_request_context() -> APIRequestContext:
@@ -112,6 +121,7 @@ async def get(url, params, pg, default_backoff, max_backoff):
             # retrying forever against the dead one.
             request_context = await _get_request_context()
             token = tokens.get_token()
+            await rate_limiter.acquire()
             logger.debug(
                 "get: attempt %s url=%s page=%s token=...%s",
                 attempt, url, pg, token[-4:],
@@ -127,8 +137,12 @@ async def get(url, params, pg, default_backoff, max_backoff):
             except Exception as e:
                 logger.warning("Error fetching page %s: %s", pg, e)
                 await _discard_request_context(request_context)
-                logger.debug("get: sleeping %ss before retry (transport error)", backoff)
-                await asyncio.sleep(backoff)
+                sleep_for = _jittered_sleep(backoff)
+                logger.debug(
+                    "get: sleeping %.1fs (base %ss) before retry (transport error)",
+                    sleep_for, backoff,
+                )
+                await asyncio.sleep(sleep_for)
                 backoff = min(2 * backoff, max_backoff)
                 continue
 
@@ -142,19 +156,25 @@ async def get(url, params, pg, default_backoff, max_backoff):
                 # forever without ever making progress, so floor it at the
                 # current backoff and keep that backoff escalating.
                 retry_after = max(int(res.headers.get("retry-after", backoff)), backoff)
+                tokens.mark_rate_limited(token, retry_after)
+                sleep_for = _jittered_sleep(retry_after)
                 print(
-                    f"Rate Limited: Retrying page {pg} after {retry_after}s "
-                    f"(url={url}, token=...{token[-4:]}, attempt={attempt})",
+                    f"Rate Limited: Retrying page {pg} after {sleep_for:.1f}s "
+                    f"(base {retry_after}s; url={url}, token=...{token[-4:]}, attempt={attempt})",
                     file=sys.stderr,
                 )
-                await asyncio.sleep(retry_after)
+                await asyncio.sleep(sleep_for)
                 backoff = min(2 * backoff, max_backoff)
                 continue
 
             if 500 <= res.status < 600:
                 logger.warning("Server error %s on page %s, retrying", res.status, pg)
-                logger.debug("get: sleeping %ss before retry (server error)", backoff)
-                await asyncio.sleep(backoff)
+                sleep_for = _jittered_sleep(backoff)
+                logger.debug(
+                    "get: sleeping %.1fs (base %ss) before retry (server error)",
+                    sleep_for, backoff,
+                )
+                await asyncio.sleep(sleep_for)
                 backoff = min(2 * backoff, max_backoff)
                 continue
 
