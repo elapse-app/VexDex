@@ -60,7 +60,14 @@ def _load_rate_from_env() -> float:
     return rate
 
 
-_LIMITER = TokenBucket(rate=_load_rate_from_env())
+# capacity=1.0 (no burst allowance): a large fan-out of concurrent callers
+# (e.g. fetching a couple hundred missing team profiles at once) would
+# otherwise let the bucket bank up to `rate` tokens and hand them out in a
+# near-instant cluster whenever it has credit. Observed live: VEX 429s on
+# those clusters even though the trailing average stayed within `rate` —
+# pinning capacity to 1 forces strictly one-at-a-time dispatch, spaced by
+# 1/rate seconds, regardless of how many callers are contending at once.
+_LIMITER = TokenBucket(rate=_load_rate_from_env(), capacity=1.0)
 
 
 async def acquire() -> None:

@@ -66,6 +66,17 @@ def test_rate_configurable_from_env(monkeypatch):
     assert module._LIMITER._rate == pytest.approx(7.5)
 
 
+def test_singleton_has_no_burst_allowance(monkeypatch):
+    # A large fan-out of concurrent callers (e.g. fetching hundreds of
+    # missing team profiles at once) must not be able to drain banked
+    # credit in a near-instant cluster — observed live to trip VEX's 429s
+    # even though the trailing average rate stayed within budget. Capacity
+    # must stay pinned to 1 regardless of the configured rate.
+    monkeypatch.setenv("VEX_MAX_REQUESTS_PER_SEC", "7.5")
+    module = _reload_rate_limiter_module()
+    assert module._LIMITER._capacity == pytest.approx(1.0)
+
+
 def test_non_positive_rate_from_env_raises(monkeypatch):
     monkeypatch.setenv("VEX_MAX_REQUESTS_PER_SEC", "0")
     with pytest.raises(RuntimeError, match="VEX_MAX_REQUESTS_PER_SEC"):
