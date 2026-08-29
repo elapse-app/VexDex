@@ -44,8 +44,13 @@ def client(monkeypatch):
     db.ensure_schema(test_engine)
     api.engine = test_engine
 
+    # Every data route now requires a bearer token; mint one and make it the
+    # default header so the existing endpoint tests exercise the happy path.
+    raw_token = db.create_api_token(test_engine, "test")
+    authed = TestClient(api.app, headers={"Authorization": f"Bearer {raw_token}"})
+
     try:
-        yield TestClient(api.app), api, db, Event, TeamStats
+        yield authed, api, db, Event, TeamStats
     finally:
         db.Base.metadata.drop_all(test_engine)
 
@@ -158,3 +163,49 @@ def test_trend_endpoint_orders_chronologically(client):
     assert resp.status_code == 200
     points = resp.json()["points"]
     assert [p["opr"] for p in points] == [10.0, 20.0]
+
+
+def test_data_endpoint_requires_a_token(client):
+    tc, api, db, Event, TeamStats = client
+    from fastapi.testclient import TestClient
+
+    bare = TestClient(api.app)
+    resp = bare.get("/api/v1/teams")
+    assert resp.status_code == 401
+    assert resp.headers["www-authenticate"] == "Bearer"
+
+
+def test_data_endpoint_rejects_a_bad_token(client):
+    tc, api, db, Event, TeamStats = client
+    from fastapi.testclient import TestClient
+
+    bad = TestClient(api.app, headers={"Authorization": "Bearer nope"})
+    assert bad.get("/api/v1/teams").status_code == 401
+
+
+def test_data_endpoint_rejects_a_revoked_token(client):
+    tc, api, db, Event, TeamStats = client
+    from fastapi.testclient import TestClient
+
+    raw = db.create_api_token(api.engine, "temp")
+    tmp = TestClient(api.app, headers={"Authorization": f"Bearer {raw}"})
+    # A team must exist so a 200 would otherwise be possible.
+    db.record_event_results(
+        api.engine, _event(1), [TeamStats(team_id=1, team_num="1A", total_matches=1, qual_matches=1)]
+    )
+    db.refresh_team_season_summary(api.engine, 190)
+    assert tmp.get("/api/v1/teams").status_code == 200
+
+    token_id = next(t.token_id for t in db.list_api_tokens(api.engine) if t.label == "temp")
+    db.revoke_api_token(api.engine, token_id=token_id)
+    assert tmp.get("/api/v1/teams").status_code == 401
+
+
+def test_health_is_public(client):
+    tc, api, db, Event, TeamStats = client
+    from fastapi.testclient import TestClient
+
+    bare = TestClient(api.app)
+    resp = bare.get("/api/v1/health")
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "ok"}

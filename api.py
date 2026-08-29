@@ -4,7 +4,8 @@ from collections.abc import Iterator
 from datetime import datetime
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session
@@ -19,6 +20,7 @@ from db import (
     ensure_schema,
     get_engine,
     get_latest_season_id,
+    verify_api_token,
 )
 
 engine = get_engine()
@@ -187,6 +189,26 @@ def get_db() -> Iterator[Session]:
 
 DbSession = Annotated[Session, Depends(get_db)]
 
+_bearer = HTTPBearer(auto_error=False, description="VexDex API token")
+
+
+def require_api_token(
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
+) -> None:
+    token = credentials.credentials if credentials else None
+    if not token or verify_api_token(engine, token) is None:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid or missing API token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+
+# Every data route hangs off this router, so authentication is the default —
+# a new endpoint added here is protected without any extra wiring. Only
+# deliberately-public routes (health) stay on `app` directly.
+router = APIRouter(dependencies=[Depends(require_api_token)])
+
 
 def _to_team_response(row: TeamSeasonSummaryRecord, team: TeamRecord | None) -> TeamSeasonResponse:
     return TeamSeasonResponse(
@@ -267,7 +289,7 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.get("/api/v1/teams", response_model=TeamLeaderboardResponse)
+@router.get("/api/v1/teams", response_model=TeamLeaderboardResponse)
 def list_current_teams(
     db: DbSession,
     limit: int = Query(default=100, ge=1, le=500),
@@ -279,17 +301,17 @@ def list_current_teams(
     )
 
 
-@app.get("/api/v1/teams/{team_id}", response_model=TeamSeasonResponse)
+@router.get("/api/v1/teams/{team_id}", response_model=TeamSeasonResponse)
 def get_current_team_by_id(team_id: int, db: DbSession) -> TeamSeasonResponse:
     return get_team_for_season_by_id(_require_latest_season_id(db), team_id, db)
 
 
-@app.get("/api/v1/teams/by-number/{team_num}", response_model=TeamSeasonResponse)
+@router.get("/api/v1/teams/by-number/{team_num}", response_model=TeamSeasonResponse)
 def get_current_team_by_number(team_num: str, db: DbSession) -> TeamSeasonResponse:
     return get_team_for_season_by_number(_require_latest_season_id(db), team_num, db)
 
 
-@app.get("/api/v1/seasons", response_model=list[SeasonSummaryResponse])
+@router.get("/api/v1/seasons", response_model=list[SeasonSummaryResponse])
 def list_historical_seasons(db: DbSession) -> list[SeasonSummaryResponse]:
     rows = db.execute(
         select(
@@ -321,7 +343,7 @@ _LEADERBOARD_SORTS = {
 }
 
 
-@app.get("/api/v1/seasons/{season_id}/teams", response_model=TeamLeaderboardResponse)
+@router.get("/api/v1/seasons/{season_id}/teams", response_model=TeamLeaderboardResponse)
 def list_teams_for_season(
     season_id: int,
     db: DbSession,
@@ -348,7 +370,7 @@ def list_teams_for_season(
     return TeamLeaderboardResponse(total=total, limit=limit, offset=offset, items=items)
 
 
-@app.get("/api/v1/seasons/{season_id}/teams/{team_id}", response_model=TeamSeasonResponse)
+@router.get("/api/v1/seasons/{season_id}/teams/{team_id}", response_model=TeamSeasonResponse)
 def get_team_for_season_by_id(season_id: int, team_id: int, db: DbSession) -> TeamSeasonResponse:
     row = db.execute(
         select(TeamSeasonSummaryRecord, TeamRecord)
@@ -362,7 +384,7 @@ def get_team_for_season_by_id(season_id: int, team_id: int, db: DbSession) -> Te
     return _to_team_response(summary, team)
 
 
-@app.get(
+@router.get(
     "/api/v1/seasons/{season_id}/teams/by-number/{team_num}",
     response_model=TeamSeasonResponse,
 )
@@ -383,7 +405,7 @@ def get_team_for_season_by_number(
     return _to_team_response(summary, team)
 
 
-@app.get(
+@router.get(
     "/api/v1/seasons/{season_id}/teams/{team_id}/trend",
     response_model=TeamEventTrendResponse,
 )
@@ -428,7 +450,7 @@ def get_team_trend(season_id: int, team_id: int, db: DbSession) -> TeamEventTren
     return TeamEventTrendResponse(season_id=season_id, team_id=team_id, team_num=team_num, points=points)
 
 
-@app.get(
+@router.get(
     "/api/v1/seasons/{season_id}/teams/{team_id}/awards",
     response_model=TeamAwardHistoryResponse,
 )
@@ -460,7 +482,7 @@ def get_team_award_history(season_id: int, team_id: int, db: DbSession) -> TeamA
     return TeamAwardHistoryResponse(season_id=season_id, team_id=team_id, team_num=team_num, awards=awards)
 
 
-@app.get("/api/v1/events/{event_id}/pick-list", response_model=PickListResponse)
+@router.get("/api/v1/events/{event_id}/pick-list", response_model=PickListResponse)
 def get_event_pick_list(
     event_id: int,
     db: DbSession,
@@ -506,7 +528,7 @@ def get_event_pick_list(
     return PickListResponse(event_id=event_id, season_id=event.season_id, items=items)
 
 
-@app.get("/api/v1/refresh-runs/latest", response_model=RefreshRunResponse)
+@router.get("/api/v1/refresh-runs/latest", response_model=RefreshRunResponse)
 def get_latest_refresh_run(db: DbSession) -> RefreshRunResponse:
     row = db.execute(
         select(DatasetRefreshRunRecord)
@@ -518,7 +540,7 @@ def get_latest_refresh_run(db: DbSession) -> RefreshRunResponse:
     return _to_refresh_run_response(row)
 
 
-@app.get("/api/v1/refresh-runs", response_model=RefreshRunsResponse)
+@router.get("/api/v1/refresh-runs", response_model=RefreshRunsResponse)
 def get_refresh_runs(
     db: DbSession,
     limit: int = Query(default=50, ge=1, le=200),
@@ -533,3 +555,6 @@ def get_refresh_runs(
 
     items = [_to_refresh_run_response(row) for row in rows]
     return RefreshRunsResponse(total=total, limit=limit, items=items)
+
+
+app.include_router(router)

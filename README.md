@@ -100,7 +100,8 @@ Production server command (recommended):
 gunicorn -k uvicorn.workers.UvicornWorker -w 2 -b 0.0.0.0:${PORT:-8000} api:app
 ```
 
-Available endpoints:
+Available endpoints (all except `/health` require a bearer token — see
+[API Authentication](#api-authentication)):
 
 - `GET /api/v1/health`
 - `GET /api/v1/teams?limit=100&offset=0` — current (latest) season leaderboard
@@ -115,6 +116,31 @@ Available endpoints:
 - `GET /api/v1/events/{event_id}/pick-list?exclude=<team_id>&limit=20` — alliance pick-list for the teams actually registered at this event, ranked by pick_list_score; `exclude` is repeatable (your own team, anyone already picked)
 - `GET /api/v1/refresh-runs/latest`
 - `GET /api/v1/refresh-runs?limit=50`
+
+## API Authentication
+
+Every endpoint except `GET /api/v1/health` requires an API token, passed as a
+bearer header:
+
+```
+Authorization: Bearer <token>
+```
+
+Requests without a valid, non-revoked token get `401`. Tokens are stored in the
+`api_tokens` table (only a SHA-256 hash is kept) and managed with the
+`manage_tokens.py` CLI, which talks to whatever database `DATABASE_URL` points
+at:
+
+```bash
+python manage_tokens.py create --label frontend   # prints the raw token once
+python manage_tokens.py list
+python manage_tokens.py revoke --label frontend    # or: --id 3
+```
+
+To issue the first production token, run the CLI against the production database
+(e.g. `fly ssh console -C "python manage_tokens.py create --label frontend"`, or
+export the production `DATABASE_URL` locally). Until at least one token exists,
+every data endpoint returns `401`.
 
 ## Database
 

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import hashlib
+import logging
+import secrets
 from collections import defaultdict
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from os import getenv
 from typing import TYPE_CHECKING
 
@@ -13,6 +16,8 @@ if TYPE_CHECKING:
     from event import Event
     from team_profile import TeamProfile
     from team_stats import TeamStats
+
+logger = logging.getLogger(__name__)
 
 
 class Base(DeclarativeBase):
@@ -230,6 +235,23 @@ class DatasetRefreshRunRecord(Base):
     )
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     dataset_fresh: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+
+class ApiTokenRecord(Base):
+    """An inbound API token. Only the SHA-256 hash of the token is stored; the
+    raw value is shown once at creation and never persisted. A token with
+    revoked_at set is rejected."""
+
+    __tablename__ = "api_tokens"
+
+    token_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
+    label: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
+    )
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 def get_engine() -> Engine:
@@ -671,3 +693,85 @@ def complete_refresh_run(
         row.completed_at = datetime.now(UTC)
         row.dataset_fresh = status == "succeeded"
         session.commit()
+
+
+# How stale last_used_at may get before verify_api_token bothers to rewrite it.
+# Coarse on purpose: this turns a write-on-every-request into an occasional one.
+_LAST_USED_REFRESH_INTERVAL = timedelta(seconds=60)
+
+
+def _hash_token(raw: str) -> str:
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
+def create_api_token(engine: Engine, label: str) -> str:
+    """Mint a new API token, persist only its hash, and return the raw token.
+    This is the only time the raw value exists — it cannot be recovered later."""
+    raw = secrets.token_urlsafe(32)
+    with Session(engine) as session:
+        session.add(ApiTokenRecord(token_hash=_hash_token(raw), label=label))
+        session.commit()
+    return raw
+
+
+def verify_api_token(engine: Engine, raw: str) -> ApiTokenRecord | None:
+    """Return the matching non-revoked token record, or None if the token is
+    unknown or revoked. Best-effort bumps last_used_at on a hit."""
+    token_hash = _hash_token(raw)
+    with Session(engine) as session:
+        row = session.execute(
+            select(ApiTokenRecord).where(ApiTokenRecord.token_hash == token_hash)
+        ).scalar_one_or_none()
+        if row is None or row.revoked_at is not None:
+            return None
+
+        now = datetime.now(UTC)
+        if row.last_used_at is None or _as_utc(row.last_used_at) < now - _LAST_USED_REFRESH_INTERVAL:
+            row.last_used_at = now
+            try:
+                session.commit()
+                session.refresh(row)
+            except Exception:  # noqa: BLE001 — a stats read must not fail on a telemetry write
+                logger.warning("Failed to update last_used_at for token %s", row.token_id)
+                session.rollback()
+        session.expunge(row)
+        return row
+
+
+def revoke_api_token(
+    engine: Engine, *, token_id: int | None = None, label: str | None = None
+) -> int:
+    """Revoke tokens by id or by label. Returns the number of tokens revoked
+    (already-revoked tokens are left untouched and not counted)."""
+    if (token_id is None) == (label is None):
+        raise ValueError("Pass exactly one of token_id or label.")
+
+    with Session(engine) as session:
+        query = select(ApiTokenRecord).where(ApiTokenRecord.revoked_at.is_(None))
+        if token_id is not None:
+            query = query.where(ApiTokenRecord.token_id == token_id)
+        else:
+            query = query.where(ApiTokenRecord.label == label)
+
+        rows = session.execute(query).scalars().all()
+        now = datetime.now(UTC)
+        for row in rows:
+            row.revoked_at = now
+        session.commit()
+        return len(rows)
+
+
+def list_api_tokens(engine: Engine) -> list[ApiTokenRecord]:
+    with Session(engine) as session:
+        rows = session.execute(
+            select(ApiTokenRecord).order_by(ApiTokenRecord.token_id.asc())
+        ).scalars().all()
+        for row in rows:
+            session.expunge(row)
+        return list(rows)
+
+
+def _as_utc(value: datetime) -> datetime:
+    """SQLite round-trips DateTime(timezone=True) as naive; treat naive as UTC
+    so comparisons against timezone-aware `now` don't raise."""
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
