@@ -1,14 +1,19 @@
 from __future__ import annotations
 
+import os
+import time
+from collections import OrderedDict
 from collections.abc import Iterator
 from datetime import datetime
+from threading import Lock
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 
 from db import (
     DatasetRefreshRunRecord,
@@ -24,13 +29,107 @@ from db import (
 )
 
 engine = get_engine()
-ensure_schema(engine)
+# Schema creation is a deploy-time step (Fly `release_command`), not something
+# every machine boot / gunicorn worker fork should re-run against Postgres.
+# Set RUN_DB_MIGRATE=1 to opt in (local dev, one-off boxes).
+if os.getenv("RUN_DB_MIGRATE"):
+    ensure_schema(engine)
 
 app = FastAPI(
     title="VexDex API",
     version="0.1.0",
     description="Read API for VEX team analytics and refresh status.",
 )
+
+# --- Response caching -------------------------------------------------------
+#
+# The dataset only changes when the weekly ingestion pipeline runs, so GET
+# responses are safe to cache for a couple of minutes. A short in-process TTL
+# cache collapses a burst of identical requests (competition-morning traffic
+# from the Elapse app) into one DB query per endpoint per worker per window;
+# the Cache-Control header lets clients and any CDN in front do the same.
+
+_CACHE_TTL_SECONDS = float(os.getenv("RESPONSE_CACHE_TTL_SECONDS", "120"))
+_CACHE_MAX_ENTRIES = int(os.getenv("RESPONSE_CACHE_MAX_ENTRIES", "512"))
+_NO_CACHE_PATHS = {"/api/v1/health", "/docs", "/redoc", "/openapi.json"}
+
+_cache_lock = Lock()
+# key -> (expires_at_monotonic, body_bytes, media_type)
+_response_cache: OrderedDict[str, tuple[float, bytes, str]] = OrderedDict()
+
+if _CACHE_TTL_SECONDS > 0:
+    _CACHE_CONTROL = (
+        f"public, max-age={int(_CACHE_TTL_SECONDS)}, "
+        "s-maxage=600, stale-while-revalidate=86400"
+    )
+else:
+    _CACHE_CONTROL = "no-store"
+
+
+def _cache_get(key: str) -> tuple[bytes, str] | None:
+    now = time.monotonic()
+    with _cache_lock:
+        entry = _response_cache.get(key)
+        if entry is None:
+            return None
+        expires_at, body, media = entry
+        if expires_at <= now:
+            _response_cache.pop(key, None)
+            return None
+        _response_cache.move_to_end(key)
+        return body, media
+
+
+def _cache_put(key: str, body: bytes, media: str) -> None:
+    with _cache_lock:
+        _response_cache[key] = (time.monotonic() + _CACHE_TTL_SECONDS, body, media)
+        _response_cache.move_to_end(key)
+        while len(_response_cache) > _CACHE_MAX_ENTRIES:
+            _response_cache.popitem(last=False)
+
+
+def _token_from(request: Request) -> str | None:
+    scheme, _, param = request.headers.get("Authorization", "").partition(" ")
+    return param.strip() if scheme.lower() == "bearer" and param.strip() else None
+
+
+@app.middleware("http")
+async def cache_and_cache_headers(request: Request, call_next):
+    if request.method != "GET" or request.url.path in _NO_CACHE_PATHS:
+        return await call_next(request)
+
+    key = f"{request.url.path}?{request.url.query}"
+
+    # Only serve a cached body to a caller that still presents a valid token —
+    # the auth dependency does not run on this fast path. verify_api_token hits
+    # the DB, so keep it off the event loop.
+    if _CACHE_TTL_SECONDS > 0:
+        hit = _cache_get(key)
+        if hit is not None:
+            token = _token_from(request)
+            if token and await run_in_threadpool(verify_api_token, engine, token) is not None:
+                body, media = hit
+                cached = Response(content=body, media_type=media)
+                cached.headers["Cache-Control"] = _CACHE_CONTROL
+                cached.headers["X-Cache"] = "HIT"
+                return cached
+
+    response = await call_next(request)
+
+    if response.status_code != 200:
+        # Never let an auth failure or 404 be cached by a client or CDN.
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+    body = b"".join([chunk async for chunk in response.body_iterator])
+    media = response.media_type or "application/json"
+    if _CACHE_TTL_SECONDS > 0:
+        _cache_put(key, body, media)
+    stored = Response(content=body, status_code=200, media_type=media)
+    stored.headers.update(response.headers)
+    stored.headers["Cache-Control"] = _CACHE_CONTROL
+    stored.headers["X-Cache"] = "MISS" if _CACHE_TTL_SECONDS > 0 else "DISABLED"
+    return stored
 
 
 class TeamSeasonResponse(BaseModel):

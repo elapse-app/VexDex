@@ -209,3 +209,27 @@ def test_health_is_public(client):
     resp = bare.get("/api/v1/health")
     assert resp.status_code == 200
     assert resp.json() == {"status": "ok"}
+
+
+def test_get_responses_are_cached_but_still_require_a_token(client):
+    tc, api, db, Event, TeamStats = client
+    from fastapi.testclient import TestClient
+
+    db.record_event_results(
+        api.engine, _event(1), [TeamStats(team_id=1, team_num="1A", total_matches=1, qual_matches=1)]
+    )
+    db.refresh_team_season_summary(api.engine, 190)
+
+    first = tc.get("/api/v1/teams")
+    assert first.status_code == 200
+    assert first.headers["x-cache"] == "MISS"
+    assert "max-age" in first.headers["cache-control"]
+
+    second = tc.get("/api/v1/teams")
+    assert second.status_code == 200
+    assert second.headers["x-cache"] == "HIT"
+    assert second.json() == first.json()
+
+    # A warm cache must not become an auth bypass.
+    bare = TestClient(api.app)
+    assert bare.get("/api/v1/teams").status_code == 401

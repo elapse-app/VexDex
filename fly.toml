@@ -7,15 +7,29 @@ app = 'vexdex'
 primary_region = 'iad'
 
 [build]
+
+[deploy]
+  # Create/upgrade the schema once per release instead of on every machine
+  # boot or worker fork. api.py no longer runs ensure_schema at import.
+  release_command = "python -c \"import db; db.ensure_schema(db.get_engine())\""
+
 [http_service]
   internal_port = 8080
   force_https = true
+  # Keep at least one machine warm so the Elapse app never eats a cold start;
+  # still let Fly stop the extras when idle.
   auto_stop_machines = 'stop'
   auto_start_machines = true
-  min_machines_running = 0
+  min_machines_running = 1
   processes = ['app']
 
+  [[http_service.http_checks]]
+    interval = '15s'
+    timeout = '2s'
+    grace_period = '5s'
+    method = 'get'
+    path = '/api/v1/health'
+
 [[vm]]
-  memory = '1gb'
-  cpus = 1
-  memory_mb = 1024
+  size = 'shared-cpu-1x'
+  memory = '512mb'

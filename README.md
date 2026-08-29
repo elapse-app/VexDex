@@ -62,6 +62,17 @@ Optional:
 - VEX_SEASON_ID: Optional season ID override. If unset, incremental runs use the latest V5RC season from VEX Events.
 - VEX_EVENT_START: ISO datetime lower bound for event fetch (default 2025-12-17T00:00:00).
 
+API host only:
+
+- RUN_DB_MIGRATE: if set, `api.py` runs `ensure_schema` at startup. Leave unset in
+  production — schema changes are applied once per release (Fly `release_command`
+  in `fly.toml`). Handy for local dev / one-off boxes.
+- RESPONSE_CACHE_TTL_SECONDS: in-process GET response cache TTL (default 120; set
+  `0` to disable and emit `Cache-Control: no-store`).
+- RESPONSE_CACHE_MAX_ENTRIES: cap on cached responses per worker (default 512).
+- For the API, point DATABASE_URL at Neon's **pooled** (`-pooler`) endpoint; keep
+  the direct URL for the pipeline and migrations.
+
 ## Run Pipeline
 
 ```bash
@@ -150,28 +161,45 @@ Database for PostgreSQL, RDS, ...) is a config change, not a code change.
 Avoid provider-specific extensions (e.g. Supabase auth/storage) so the
 database itself stays a portable, standard Postgres instance.
 
-Optional Terraform for provisioning the DB (Neon) and API host (Azure App
-Service) as code: see [`infra/`](infra/).
+The `infra/` Terraform is an older Azure App Service + Neon sketch and predates
+the move to Fly.io below; treat it as a reference, not the current setup.
 
-## Deploy API (Azure App Service)
+## Deploy API (Fly.io)
 
-1. Create an Azure Web App (Linux, Python 3.12).
-2. In App Service Configuration, set startup command to:
+Config lives in `fly.toml` (app `vexdex`, region `iad`) and `Dockerfile`.
 
-```bash
-gunicorn -k uvicorn.workers.UvicornWorker -w 2 -b 0.0.0.0:$PORT api:app
-```
+1. One-time: `fly launch` / `fly apps create vexdex`, then set secrets:
+   ```bash
+   fly secrets set DATABASE_URL='postgresql+psycopg://…-pooler.…/db' VEX_TOKENS='…'
+   ```
+   Use Neon's **pooled** (`-pooler`) host here; keep the direct URL for the
+   ingestion workflow's `DATABASE_URL` secret.
+2. `fly scale count 2` — two machines for rolling deploys and redundancy.
+3. Push to `main` touching `api.py` / `db.py` / `fly.toml` / `Dockerfile` /
+   `requirements.txt` → `.github/workflows/deploy-api.yml` runs
+   `flyctl deploy --remote-only` (needs the `FLY_API_TOKEN` secret).
+4. Each deploy runs `[deploy] release_command` in `fly.toml` to apply the schema
+   (`db.ensure_schema`). Then mint the first API token (see **API Authentication**).
 
-3. Set required app settings in Azure:
-	- `DATABASE_URL` (a Postgres connection string, recommended) or `DB_USER` / `DB_PASS` / `DB_HOST` / `DB_NAME`
-4. Add GitHub repository secrets:
-	- `AZURE_WEBAPP_NAME`
-	- `AZURE_WEBAPP_PUBLISH_PROFILE`
-5. Push to `main`/`master` or run the `deploy-api-azure` workflow manually.
+### Hosting & scaling notes
 
-Deployment workflow:
+- **No scale-to-zero:** `min_machines_running = 1` keeps a machine warm so
+  clients (e.g. the Elapse app) never hit a cold start.
+- **Caching does the heavy lifting.** The dataset only changes when the weekly
+  pipeline runs, so every GET carries
+  `Cache-Control: public, max-age=120, s-maxage=600, stale-while-revalidate=86400`
+  and the app keeps a short in-process response cache (see the env vars above).
+  A burst of identical requests collapses to ~one DB query per endpoint per
+  worker per TTL window. Auth is still enforced on cache hits.
+- **Optional CDN:** putting Cloudflare (free) in front caches responses at the
+  edge and adds DDoS protection + inbound rate limiting. Cache hits carry an
+  `Authorization` header, so add a Cache Rule on `/api/v1/*` that caches anyway
+  and ignores that header (responses are not per-user); purge the edge cache
+  after a manual pipeline run.
+- **DB connections:** `get_engine()` uses `pool_size=5, max_overflow=5,
+  pool_recycle=300`; the pooled Neon endpoint absorbs bursts across workers.
 
-- `.github/workflows/deploy-api.yml`
+Deployment workflow: `.github/workflows/deploy-api.yml`
 
 ## Automated Ingestion (GitHub Actions)
 

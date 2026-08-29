@@ -254,10 +254,22 @@ class ApiTokenRecord(Base):
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+def _create_engine(db_url: str) -> Engine:
+    kwargs: dict = {"future": True, "pool_pre_ping": True}
+    if not db_url.startswith("sqlite"):
+        # Keep per-process connection use small and bounded: the API runs
+        # several gunicorn workers and should point DATABASE_URL at Neon's
+        # pooled (-pooler / PgBouncer) endpoint. pool_recycle stays under
+        # Neon's idle-connection cutoff. The ingestion pipeline uses the
+        # direct (non-pooled) URL, which this sizing is also fine for.
+        kwargs.update(pool_size=5, max_overflow=5, pool_recycle=300)
+    return create_engine(db_url, **kwargs)
+
+
 def get_engine() -> Engine:
     db_url = getenv("DATABASE_URL")
     if db_url:
-        return create_engine(db_url, future=True, pool_pre_ping=True)
+        return _create_engine(db_url)
 
     user = getenv("DB_USER", "")
     password = getenv("DB_PASS", "")
@@ -270,11 +282,7 @@ def get_engine() -> Engine:
             "Set DATABASE_URL or all of DB_USER, DB_PASS, DB_HOST, DB_NAME."
         )
 
-    return create_engine(
-        f"postgresql+psycopg://{user}:{password}@{host}/{database}",
-        future=True,
-        pool_pre_ping=True,
-    )
+    return _create_engine(f"postgresql+psycopg://{user}:{password}@{host}/{database}")
 
 
 def ensure_schema(engine: Engine) -> None:
