@@ -53,9 +53,7 @@ Copy .env.example and fill values.
 Required:
 
 - VEX_TOKENS: Comma-separated VEX Events bearer tokens.
-- Database config (Postgres):
-	- Preferred: DATABASE_URL, e.g. `postgresql+psycopg://user:pass@host/dbname`
-	- Fallback: DB_USER, DB_PASS, DB_HOST, DB_NAME
+- DATABASE_URL: Postgres connection string, e.g. `postgresql+psycopg://user:pass@host/dbname`.
 
 Optional:
 
@@ -156,13 +154,10 @@ every data endpoint returns `401`.
 ## Database
 
 Any Postgres instance works — the app only ever talks to it through a single
-`DATABASE_URL`, so a hobby-tier managed Postgres (Neon, Supabase, Azure
-Database for PostgreSQL, RDS, ...) is a config change, not a code change.
-Avoid provider-specific extensions (e.g. Supabase auth/storage) so the
-database itself stays a portable, standard Postgres instance.
-
-The `infra/` Terraform is an older Azure App Service + Neon sketch and predates
-the move to Fly.io below; treat it as a reference, not the current setup.
+`DATABASE_URL`, so a hobby-tier managed Postgres (Neon, Supabase, RDS, ...) is a
+config change, not a code change. Avoid provider-specific extensions (e.g.
+Supabase auth/storage) so the database itself stays a portable, standard Postgres
+instance. VexDex runs on Neon.
 
 ## Deploy API (Fly.io)
 
@@ -191,11 +186,6 @@ Config lives in `fly.toml` (app `vexdex`, region `iad`) and `Dockerfile`.
   and the app keeps a short in-process response cache (see the env vars above).
   A burst of identical requests collapses to ~one DB query per endpoint per
   worker per TTL window. Auth is still enforced on cache hits.
-- **Optional CDN:** putting Cloudflare (free) in front caches responses at the
-  edge and adds DDoS protection + inbound rate limiting. Cache hits carry an
-  `Authorization` header, so add a Cache Rule on `/api/v1/*` that caches anyway
-  and ignores that header (responses are not per-user); purge the edge cache
-  after a manual pipeline run.
 - **DB connections:** `get_engine()` uses `pool_size=5, max_overflow=5,
   pool_recycle=300`; the pooled Neon endpoint absorbs bursts across workers.
 
@@ -215,7 +205,7 @@ Behavior:
 Required repository secrets:
 
 - `VEX_TOKENS`
-- `DATABASE_URL` (recommended) or `DB_USER` / `DB_PASS` / `DB_HOST` / `DB_NAME`
+- `DATABASE_URL`
 
 Optional repository secrets:
 

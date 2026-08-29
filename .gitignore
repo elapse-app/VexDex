@@ -208,12 +208,3 @@ __marimo__/
 
 #idea
 .idea/*
-
-# Terraform
-infra/.terraform/
-infra/*.tfstate
-infra/*.tfstate.*
-infra/*.tfvars
-infra/crash.log
-infra/override.tf
-infra/override.tf.json

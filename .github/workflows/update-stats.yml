@@ -34,10 +34,6 @@ jobs:
         env:
           VEX_TOKENS: ${{ secrets.VEX_TOKENS }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          DB_USER: ${{ secrets.DB_USER }}
-          DB_PASS: ${{ secrets.DB_PASS }}
-          DB_HOST: ${{ secrets.DB_HOST }}
-          DB_NAME: ${{ secrets.DB_NAME }}
           VEX_SEASON_ID: ${{ secrets.VEX_SEASON_ID }}
           VEX_EVENT_START: ${{ secrets.VEX_EVENT_START }}
         run: |

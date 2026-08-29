@@ -1,8 +1,7 @@
 """Issue, list, and revoke inbound API tokens for the VexDex API.
 
-Runs against whatever database `get_engine()` resolves (DATABASE_URL, or the
-DB_USER/DB_PASS/DB_HOST/DB_NAME fallback). To manage production tokens, point
-those at the production DB — e.g. `fly ssh console -C "python manage_tokens.py list"`.
+Runs against the database in `DATABASE_URL`. To manage production tokens, point
+that at the production DB — e.g. `fly ssh console -C "python manage_tokens.py list"`.
 
     python manage_tokens.py create --label frontend
     python manage_tokens.py list

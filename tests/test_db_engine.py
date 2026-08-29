@@ -11,26 +11,17 @@ def test_get_engine_from_database_url(monkeypatch):
     assert engine.url.drivername == "sqlite+pysqlite"
 
 
-def test_get_engine_requires_fallback_parts(monkeypatch):
+def test_get_engine_requires_database_url(monkeypatch):
     monkeypatch.delenv("DATABASE_URL", raising=False)
-    monkeypatch.delenv("DB_USER", raising=False)
-    monkeypatch.delenv("DB_PASS", raising=False)
-    monkeypatch.delenv("DB_HOST", raising=False)
-    monkeypatch.delenv("DB_NAME", raising=False)
 
-    with pytest.raises(RuntimeError, match="Database connection is not configured"):
+    with pytest.raises(RuntimeError, match="DATABASE_URL is not set"):
         db.get_engine()
 
 
-def test_get_engine_fallback_uses_postgres_driver(monkeypatch):
-    monkeypatch.delenv("DATABASE_URL", raising=False)
-    monkeypatch.setenv("DB_USER", "u")
-    monkeypatch.setenv("DB_PASS", "p")
-    monkeypatch.setenv("DB_HOST", "h")
-    monkeypatch.setenv("DB_NAME", "d")
+def test_get_engine_sets_a_bounded_pool_for_postgres(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://u:p@h/d")
 
     engine = db.get_engine()
 
     assert engine.url.drivername == "postgresql+psycopg"
-    assert engine.url.host == "h"
-    assert engine.url.database == "d"
+    assert engine.pool.size() == 5

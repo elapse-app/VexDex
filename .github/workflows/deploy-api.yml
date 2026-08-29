@@ -8,7 +8,6 @@ on:
       - "api.py"
       - "db.py"
       - "requirements.txt"
-      - "runtime.txt"
       - "fly.toml"
       - "Dockerfile"
       - ".github/workflows/deploy-api.yml"

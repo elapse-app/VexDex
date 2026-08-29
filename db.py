@@ -268,21 +268,11 @@ def _create_engine(db_url: str) -> Engine:
 
 def get_engine() -> Engine:
     db_url = getenv("DATABASE_URL")
-    if db_url:
-        return _create_engine(db_url)
-
-    user = getenv("DB_USER", "")
-    password = getenv("DB_PASS", "")
-    host = getenv("DB_HOST", "")
-    database = getenv("DB_NAME", "")
-
-    if not all([user, password, host, database]):
+    if not db_url:
         raise RuntimeError(
-            "Database connection is not configured. "
-            "Set DATABASE_URL or all of DB_USER, DB_PASS, DB_HOST, DB_NAME."
+            "DATABASE_URL is not set — expected a postgresql+psycopg://user:pass@host/db URL."
         )
-
-    return _create_engine(f"postgresql+psycopg://{user}:{password}@{host}/{database}")
+    return _create_engine(db_url)
 
 
 def ensure_schema(engine: Engine) -> None:
