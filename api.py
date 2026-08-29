@@ -272,8 +272,11 @@ def list_current_teams(
     db: DbSession,
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
+    sort: str = Query(default="ts", pattern="^(ts|pick_list|ccwm|opr)$"),
 ) -> TeamLeaderboardResponse:
-    return list_teams_for_season(_require_latest_season_id(db), db, limit=limit, offset=offset)
+    return list_teams_for_season(
+        _require_latest_season_id(db), db, limit=limit, offset=offset, sort=sort
+    )
 
 
 @app.get("/api/v1/teams/{team_id}", response_model=TeamSeasonResponse)
