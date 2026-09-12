@@ -21,12 +21,15 @@ from db import (
     TeamAwardRecord,
     TeamEventResultRecord,
     TeamRecord,
+    TeamSeasonHistoryRecord,
     TeamSeasonSummaryRecord,
     ensure_schema,
     get_engine,
     get_latest_season_id,
     verify_api_token,
 )
+
+TeamSeasonRow = TeamSeasonSummaryRecord | TeamSeasonHistoryRecord
 
 engine = get_engine()
 # Schema creation is a deploy-time step (Fly `release_command`), not something
@@ -315,7 +318,7 @@ def require_api_token(
 router = APIRouter(dependencies=[Depends(require_api_token)])
 
 
-def _to_team_response(row: TeamSeasonSummaryRecord, team: TeamRecord | None) -> TeamSeasonResponse:
+def _to_team_response(row: TeamSeasonRow, team: TeamRecord | None) -> TeamSeasonResponse:
     return TeamSeasonResponse(
         season_id=row.season_id,
         team_id=row.team_id,
@@ -390,6 +393,16 @@ def _require_latest_season_id(db: DbSession) -> int:
     return season_id
 
 
+def _season_model(db: DbSession, season_id: int) -> type[TeamSeasonRow]:
+    """team_season_summary holds only the current season — everything else has
+    been moved into team_season_history by archive_completed_seasons(). Pick
+    whichever table actually owns this season_id so every season-scoped route
+    keeps working transparently whether the season is live or archived."""
+    if season_id == get_latest_season_id(db.get_bind()):
+        return TeamSeasonSummaryRecord
+    return TeamSeasonHistoryRecord
+
+
 @app.get("/api/v1/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -418,36 +431,41 @@ def get_current_team_by_number(team_num: str, db: DbSession) -> TeamSeasonRespon
     return get_team_for_season_by_number(_require_latest_season_id(db), team_num, db)
 
 
-@router.get("/api/v1/seasons", response_model=list[SeasonSummaryResponse])
-def list_historical_seasons(db: DbSession) -> list[SeasonSummaryResponse]:
+def _season_group_counts(db: DbSession, model: type[TeamSeasonRow]) -> list[SeasonSummaryResponse]:
     rows = db.execute(
         select(
-            TeamSeasonSummaryRecord.season_id,
+            model.season_id,
             func.count().label("teams"),
-            func.max(TeamSeasonSummaryRecord.updated_at).label("last_updated"),
-        )
-        .group_by(TeamSeasonSummaryRecord.season_id)
-        .order_by(TeamSeasonSummaryRecord.season_id.desc())
+            func.max(model.updated_at).label("last_updated"),
+        ).group_by(model.season_id)
     ).all()
-
     return [
-        SeasonSummaryResponse(
-            season_id=int(row[0]),
-            teams=int(row[1]),
-            last_updated=row[2],
-        )
+        SeasonSummaryResponse(season_id=int(row[0]), teams=int(row[1]), last_updated=row[2])
         for row in rows
     ]
 
 
-_LEADERBOARD_SORTS = {
-    # default: TrueSkill rank, best first
-    "ts": (TeamSeasonSummaryRecord.ts_rank.asc(), desc(TeamSeasonSummaryRecord.ts_exposed)),
-    # alliance pick-list order — nulls (no data yet) sort last
-    "pick_list": (desc(TeamSeasonSummaryRecord.pick_list_score),),
-    "ccwm": (desc(TeamSeasonSummaryRecord.ccwm_avg),),
-    "opr": (desc(TeamSeasonSummaryRecord.opr_avg),),
-}
+@router.get("/api/v1/seasons", response_model=list[SeasonSummaryResponse])
+def list_historical_seasons(db: DbSession) -> list[SeasonSummaryResponse]:
+    """Every season with data — the current one (team_season_summary) plus
+    every archived one (team_season_history), most recent first."""
+    seasons = _season_group_counts(db, TeamSeasonSummaryRecord) + _season_group_counts(
+        db, TeamSeasonHistoryRecord
+    )
+    seasons.sort(key=lambda s: s.season_id, reverse=True)
+    return seasons
+
+
+def _leaderboard_sort_clauses(model: type[TeamSeasonRow], sort: str) -> tuple:
+    sorts = {
+        # default: TrueSkill rank, best first
+        "ts": (model.ts_rank.asc(), desc(model.ts_exposed)),
+        # alliance pick-list order — nulls (no data yet) sort last
+        "pick_list": (desc(model.pick_list_score),),
+        "ccwm": (desc(model.ccwm_avg),),
+        "opr": (desc(model.opr_avg),),
+    }
+    return sorts[sort]
 
 
 @router.get("/api/v1/seasons/{season_id}/teams", response_model=TeamLeaderboardResponse)
@@ -459,16 +477,17 @@ def list_teams_for_season(
     sort: str = Query(default="ts", pattern="^(ts|pick_list|ccwm|opr)$"),
     search: str | None = Query(default=None, min_length=1, max_length=64),
 ) -> TeamLeaderboardResponse:
+    model = _season_model(db, season_id)
     query = (
-        select(TeamSeasonSummaryRecord, TeamRecord)
-        .join(TeamRecord, TeamRecord.team_id == TeamSeasonSummaryRecord.team_id)
-        .where(TeamSeasonSummaryRecord.season_id == season_id)
+        select(model, TeamRecord)
+        .join(TeamRecord, TeamRecord.team_id == model.team_id)
+        .where(model.season_id == season_id)
     )
     count_query = (
         select(func.count())
-        .select_from(TeamSeasonSummaryRecord)
-        .join(TeamRecord, TeamRecord.team_id == TeamSeasonSummaryRecord.team_id)
-        .where(TeamSeasonSummaryRecord.season_id == season_id)
+        .select_from(model)
+        .join(TeamRecord, TeamRecord.team_id == model.team_id)
+        .where(model.season_id == season_id)
     )
     if search:
         # Case-insensitive partial match on team number or name — restores
@@ -477,7 +496,7 @@ def list_teams_for_season(
         # VexDex existed.
         pattern = f"%{search}%"
         search_filter = or_(
-            TeamSeasonSummaryRecord.team_num.ilike(pattern),
+            model.team_num.ilike(pattern),
             TeamRecord.team_name.ilike(pattern),
         )
         query = query.where(search_filter)
@@ -485,7 +504,7 @@ def list_teams_for_season(
 
     total = db.execute(count_query).scalar_one()
     rows = db.execute(
-        query.order_by(*_LEADERBOARD_SORTS[sort], TeamSeasonSummaryRecord.team_num.asc())
+        query.order_by(*_leaderboard_sort_clauses(model, sort), model.team_num.asc())
         .offset(offset)
         .limit(limit)
     ).all()
@@ -496,11 +515,12 @@ def list_teams_for_season(
 
 @router.get("/api/v1/seasons/{season_id}/teams/{team_id}", response_model=TeamSeasonResponse)
 def get_team_for_season_by_id(season_id: int, team_id: int, db: DbSession) -> TeamSeasonResponse:
+    model = _season_model(db, season_id)
     row = db.execute(
-        select(TeamSeasonSummaryRecord, TeamRecord)
-        .join(TeamRecord, TeamRecord.team_id == TeamSeasonSummaryRecord.team_id)
-        .where(TeamSeasonSummaryRecord.season_id == season_id)
-        .where(TeamSeasonSummaryRecord.team_id == team_id)
+        select(model, TeamRecord)
+        .join(TeamRecord, TeamRecord.team_id == model.team_id)
+        .where(model.season_id == season_id)
+        .where(model.team_id == team_id)
     ).one_or_none()
     if row is None:
         raise HTTPException(status_code=404, detail="Team not found for this season")
@@ -517,11 +537,12 @@ def get_team_for_season_by_number(
     team_num: str,
     db: DbSession,
 ) -> TeamSeasonResponse:
+    model = _season_model(db, season_id)
     row = db.execute(
-        select(TeamSeasonSummaryRecord, TeamRecord)
-        .join(TeamRecord, TeamRecord.team_id == TeamSeasonSummaryRecord.team_id)
-        .where(TeamSeasonSummaryRecord.season_id == season_id)
-        .where(TeamSeasonSummaryRecord.team_num == team_num)
+        select(model, TeamRecord)
+        .join(TeamRecord, TeamRecord.team_id == model.team_id)
+        .where(model.season_id == season_id)
+        .where(model.team_num == team_num)
     ).one_or_none()
     if row is None:
         raise HTTPException(status_code=404, detail="Team not found for this season")
@@ -620,19 +641,20 @@ def get_event_pick_list(
     if event is None:
         raise HTTPException(status_code=404, detail="Event not found")
 
+    model = _season_model(db, event.season_id)
     rows = db.execute(
-        select(TeamSeasonSummaryRecord, TeamRecord)
-        .join(TeamRecord, TeamRecord.team_id == TeamSeasonSummaryRecord.team_id)
-        .where(TeamSeasonSummaryRecord.season_id == event.season_id)
+        select(model, TeamRecord)
+        .join(TeamRecord, TeamRecord.team_id == model.team_id)
+        .where(model.season_id == event.season_id)
         .where(
-            TeamSeasonSummaryRecord.team_id.in_(
+            model.team_id.in_(
                 select(TeamEventResultRecord.team_id).where(
                     TeamEventResultRecord.event_id == event_id
                 )
             )
         )
-        .where(TeamSeasonSummaryRecord.team_id.notin_(exclude))
-        .order_by(desc(TeamSeasonSummaryRecord.pick_list_score).nulls_last())
+        .where(model.team_id.notin_(exclude))
+        .order_by(desc(model.pick_list_score).nulls_last())
         .limit(limit)
     ).all()
 

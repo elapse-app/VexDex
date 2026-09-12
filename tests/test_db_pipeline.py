@@ -265,6 +265,54 @@ def test_refresh_team_season_summary_computes_percentiles_and_pick_list(engine):
     assert rows[2].pick_list_score == pytest.approx(expected_team_2)
 
 
+def test_archive_completed_seasons_moves_stale_seasons_to_history(engine):
+    old_season, current_season = 190, 197
+
+    db.record_event_results(
+        engine,
+        _event(event_id=1, season_id=old_season),
+        [TeamStats(team_id=1, team_num="100A", total_matches=1, qual_matches=1, opr=10.0, dpr=5.0, ccwm=5.0)],
+    )
+    db.refresh_team_season_summary(engine, old_season)
+
+    db.record_event_results(
+        engine,
+        _event(event_id=2, season_id=current_season),
+        [TeamStats(team_id=1, team_num="100A", total_matches=1, qual_matches=1, opr=12.0, dpr=4.0, ccwm=8.0)],
+    )
+    db.refresh_team_season_summary(engine, current_season)
+
+    archived = db.archive_completed_seasons(engine)
+    assert archived == 1
+
+    from sqlalchemy.orm import Session
+
+    with Session(engine) as session:
+        remaining = session.execute(select(db.TeamSeasonSummaryRecord)).scalars().all()
+        history = session.execute(select(db.TeamSeasonHistoryRecord)).scalars().all()
+
+    assert {r.season_id for r in remaining} == {current_season}
+    assert {r.season_id for r in history} == {old_season}
+    assert history[0].team_num == "100A"
+    assert history[0].opr_avg == pytest.approx(10.0)
+    assert history[0].archived_at is not None
+
+    # Idempotent: calling again with nothing new to archive is a no-op.
+    assert db.archive_completed_seasons(engine) == 0
+
+
+def test_archive_completed_seasons_is_noop_with_only_one_season(engine):
+    db.record_event_results(
+        engine,
+        _event(event_id=1, season_id=190),
+        [TeamStats(team_id=1, team_num="100A", total_matches=1, qual_matches=1, opr=1.0, dpr=1.0, ccwm=0.0)],
+    )
+    db.refresh_team_season_summary(engine, 190)
+
+    assert db.archive_completed_seasons(engine) == 0
+    assert db.get_latest_season_id(engine) == 190
+
+
 def test_in_progress_event_tracking(engine):
     now = datetime(2026, 1, 10, 12, 0, 0, tzinfo=UTC)
     ongoing = _event(

@@ -245,6 +245,52 @@ def test_teams_search_matches_partial_team_name_case_insensitively(client):
     assert body["items"][0]["team_name"] == "Rushdown Robotics"
 
 
+def test_archived_season_still_readable_through_the_same_routes(client):
+    tc, api, db, Event, TeamStats = client
+    engine = api.engine
+    old_season, current_season = 190, 197
+
+    db.record_event_results(
+        engine,
+        _event(1, season_id=old_season),
+        [TeamStats(team_id=1, team_num="1A", total_matches=1, qual_matches=1, opr=10.0, ccwm=10.0)],
+    )
+    db.refresh_team_season_summary(engine, old_season)
+
+    db.record_event_results(
+        engine,
+        _event(2, season_id=current_season),
+        [TeamStats(team_id=1, team_num="1A", total_matches=1, qual_matches=1, opr=20.0, ccwm=20.0)],
+    )
+    db.refresh_team_season_summary(engine, current_season)
+
+    archived = db.archive_completed_seasons(engine)
+    assert archived == 1
+
+    # The season picker still lists both seasons, current one first.
+    seasons_resp = tc.get("/api/v1/seasons")
+    assert seasons_resp.status_code == 200
+    season_ids = [s["season_id"] for s in seasons_resp.json()]
+    assert season_ids == [current_season, old_season]
+
+    # The archived season's leaderboard still resolves, from history now.
+    archived_resp = tc.get(f"/api/v1/seasons/{old_season}/teams")
+    assert archived_resp.status_code == 200
+    body = archived_resp.json()
+    assert body["total"] == 1
+    assert body["items"][0]["ccwm_avg"] == pytest.approx(10.0)
+
+    # The current season's single-team lookup still comes from the live table.
+    current_resp = tc.get(f"/api/v1/seasons/{current_season}/teams/1")
+    assert current_resp.status_code == 200
+    assert current_resp.json()["ccwm_avg"] == pytest.approx(20.0)
+
+    # And the un-prefixed "current" routes still resolve to the live season.
+    top_level_resp = tc.get("/api/v1/teams/1")
+    assert top_level_resp.status_code == 200
+    assert top_level_resp.json()["season_id"] == current_season
+
+
 def test_teams_search_with_no_matches_returns_empty(client):
     tc, api, db, Event, TeamStats = client
     engine = api.engine

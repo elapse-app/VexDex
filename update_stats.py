@@ -7,6 +7,7 @@ from typing import Any
 
 from config import load_app_config
 from db import (
+    archive_completed_seasons,
     complete_refresh_run,
     ensure_schema,
     get_engine,
@@ -284,6 +285,10 @@ async def update_events(*, season_id: int | None = None, include_entire_season: 
 
         refresh_team_season_summary(engine, target_season_id)
 
+        archived = archive_completed_seasons(engine)
+        if archived:
+            logger.info("Archived %s team-season row(s) from prior season(s).", archived)
+
         complete_refresh_run(
             engine,
             run_id=run_id,
@@ -314,6 +319,14 @@ async def main():
         help="Manually compute stats for all events in the given season.",
     )
     parser.add_argument(
+        "--archive-completed-seasons",
+        action="store_true",
+        help="Move any non-current season(s) out of team_season_summary and into "
+             "team_season_history immediately, without running the ingestion "
+             "pipeline. Useful for a one-time cleanup or to avoid waiting for "
+             "the next scheduled run to pick up a season rollover.",
+    )
+    parser.add_argument(
         "-v", "--verbose",
         action="store_true",
         help="Enable debug logging: per-request tracing (tokens, pages, backoff/retry "
@@ -326,6 +339,11 @@ async def main():
         format="%(asctime)s %(levelname)s %(name)s - %(message)s",
     )
     try:
+        if args.archive_completed_seasons:
+            archived = archive_completed_seasons(engine)
+            logger.info("Archived %s team-season row(s) from prior season(s).", archived)
+            return
+
         if args.season_backfill is not None:
             await update_events(
                 season_id=args.season_backfill,

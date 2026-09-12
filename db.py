@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 from os import getenv
 from typing import TYPE_CHECKING
 
-from sqlalchemy import JSON, Boolean, DateTime, Float, Integer, String, create_engine, select
+from sqlalchemy import JSON, Boolean, DateTime, Float, Integer, String, create_engine, func, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
@@ -142,15 +142,11 @@ class TeamAwardRecord(Base):
     )
 
 
-class TeamSeasonSummaryRecord(Base):
-    """Derived from team_event_results (+ teams for region). Safe to drop and
-    rebuild at any time."""
-
-    __tablename__ = "team_season_summary"
-
-    season_id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    team_id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    team_num: Mapped[str] = mapped_column(String(64))
+class _TeamSeasonStatsMixin:
+    """Stat columns shared verbatim by TeamSeasonSummaryRecord (the live,
+    current-season table) and TeamSeasonHistoryRecord (the frozen archive of
+    completed seasons). Split out only because these two tables must always
+    stay in exact lockstep — not a pattern used elsewhere in this file."""
 
     events_count: Mapped[int] = mapped_column(Integer, default=0)
     matches_played: Mapped[int] = mapped_column(Integer, default=0)
@@ -217,7 +213,39 @@ class TeamSeasonSummaryRecord(Base):
     qualed_worlds: Mapped[bool] = mapped_column(Boolean, default=False)
     qualed_regionals: Mapped[bool] = mapped_column(Boolean, default=False)
 
+
+class TeamSeasonSummaryRecord(_TeamSeasonStatsMixin, Base):
+    """Derived from team_event_results (+ teams for region). Safe to drop and
+    rebuild at any time. Holds only the current season — older seasons are
+    moved into team_season_history by archive_completed_seasons() once a
+    newer season_id starts appearing here, so don't assume old season_ids
+    persist in this table."""
+
+    __tablename__ = "team_season_summary"
+
+    season_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    team_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    team_num: Mapped[str] = mapped_column(String(64))
+
     updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
+    )
+
+
+class TeamSeasonHistoryRecord(_TeamSeasonStatsMixin, Base):
+    """Frozen snapshot of a completed season's team_season_summary rows.
+    Populated only by archive_completed_seasons() — never rebuilt from
+    team_event_results, so it stays stable even if a past season's event
+    results were ever revisited."""
+
+    __tablename__ = "team_season_history"
+
+    season_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    team_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    team_num: Mapped[str] = mapped_column(String(64))
+
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    archived_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC)
     )
 
@@ -630,6 +658,57 @@ def _assign_percentiles_and_pick_list(summaries: dict[int, TeamSeasonSummaryReco
                 + PICK_LIST_WEIGHTS["skills"] * skills_component
                 + PICK_LIST_WEIGHTS["awp"] * awp_pct[team_id]
             )
+
+
+_TEAM_SEASON_STAT_COLUMNS = [
+    c.name
+    for c in TeamSeasonSummaryRecord.__table__.columns
+    if c.name not in {"season_id", "team_id", "team_num", "updated_at"}
+]
+
+
+def archive_completed_seasons(engine: Engine) -> int:
+    """Move every team_season_summary row whose season_id is below the
+    current max season_id present into team_season_history, then delete it
+    from team_season_summary. Returns the number of rows archived; a no-op
+    (returns 0) if at most one season_id is present.
+
+    Keying off "the current max season_id" — not whichever season a caller
+    just finished processing — is what makes this safe to call after any
+    pipeline run, in any order: a genuine season rollover (a new, higher
+    season_id starts appearing) and a one-off `--season-backfill` of an old
+    season both self-correct to the same end state, with no extra
+    coordination needed between call sites."""
+    now = datetime.now(UTC)
+    with Session(engine) as session:
+        current_max = session.execute(
+            select(func.max(TeamSeasonSummaryRecord.season_id))
+        ).scalar_one_or_none()
+        if current_max is None:
+            return 0
+
+        stale_rows = session.execute(
+            select(TeamSeasonSummaryRecord).where(
+                TeamSeasonSummaryRecord.season_id != current_max
+            )
+        ).scalars().all()
+
+        for row in stale_rows:
+            session.merge(
+                TeamSeasonHistoryRecord(
+                    season_id=row.season_id,
+                    team_id=row.team_id,
+                    team_num=row.team_num,
+                    updated_at=row.updated_at,
+                    archived_at=now,
+                    **{name: getattr(row, name) for name in _TEAM_SEASON_STAT_COLUMNS},
+                )
+            )
+        for row in stale_rows:
+            session.delete(row)
+
+        session.commit()
+        return len(stale_rows)
 
 
 def get_processed_event_ids(engine: Engine) -> set[int]:
