@@ -9,6 +9,7 @@ VexDex pulls VEX Events data (matches, rankings, skills, awards, team profiles),
 - Win/loss record (overall, qualification-only, elimination-only), with qualification results trusted from VEX's authoritative rankings data rather than inferred from raw scores (a disqualification or other ruling can flip a match's official result without changing its score).
 - Ranking-tiebreaker averages: autonomous points (AP), win points (WP), and an estimated autonomous win point (AWP) rate, derived from the official VRC/V5RC point formula (2 WP/win, 1 WP/tie, +1 WP per AWP).
 - Skills scores (driver + programming) and season-wide skills rankings — globally, by region, and again excluding teams that already hold a qualifying award ("unqualed" rank).
+- TrueSkill rank within a team's region (`region_ts_rank`), alongside the existing global `ts_rank`.
 - World/regional qualification tracking from event awards data.
 - Event-by-event rating trend per team (the thing a mutable running average could never answer: is this team improving?).
 - Strength of schedule (average opponent OPR faced) and a field-strength z-score, so a small local event and a Worlds-caliber field are comparable.
@@ -30,7 +31,7 @@ VexDex pulls VEX Events data (matches, rankings, skills, awards, team profiles),
 
 - `teams` / `events`: identity tables. `teams.team_name`/`grade`/`region` come from a one-time `/teams/{id}` profile fetch per team, not refetched once known.
 - `team_event_results`: one immutable row per team per event — win/loss record (total/qual/elim), AP/WP/AWP, OPR/DPR/CCWM, strength of schedule, a field-strength z-score, a TrueSkill snapshot, skills scores, and that event's qualification flags. Never updated after insert — this is the source of truth.
-- `team_season_summary`: derived from `team_event_results` (+ `teams` for region). Season win/loss totals, averaged/weighted AP/WP/AWP, OPR/DPR/CCWM/SOS averages and bests, the team's latest TrueSkill state, season-best skills score with global/region/unqualed ranks, season qualification flags, season percentile ranks (CCWM, TrueSkill), and a pick-list composite score. Safe to drop and rebuild from the fact table at any time.
+- `team_season_summary`: derived from `team_event_results` (+ `teams` for region). Season win/loss totals, averaged/weighted AP/WP/AWP, OPR/DPR/CCWM/SOS averages and bests, the team's latest TrueSkill state with both a global rank (`ts_rank`) and a region rank (`region_ts_rank`), season-best skills score with global/region/unqualed ranks, season qualification flags, season percentile ranks (CCWM, TrueSkill), and a pick-list composite score. Safe to drop and rebuild from the fact table at any time.
 - `team_awards`: one row per award a team won at an event (title + qualifications) — the actual history behind the qualed_worlds/qualed_regionals flags.
 - `dataset_refresh_runs`: audit log of pipeline runs.
 

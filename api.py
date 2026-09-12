@@ -177,6 +177,12 @@ class TeamSeasonResponse(BaseModel):
     ts_sigma: float
     ts_exposed: float
     ts_rank: int
+    # No per-event region_ts_rank on TeamEventTrendPoint below: region isn't
+    # tracked in the ingestion pipeline (tournament_stats.py), only carried on
+    # TeamRecord and joined in at season-summary time, and elapse has no trend
+    # UI for a regional rank. Season-summary-only is intentional, not an
+    # oversight.
+    region_ts_rank: int | None
 
     skills_driver: int | None
     skills_prog: int | None
@@ -349,6 +355,7 @@ def _to_team_response(row: TeamSeasonSummaryRecord, team: TeamRecord | None) -> 
         ts_sigma=row.ts_sigma,
         ts_exposed=row.ts_exposed,
         ts_rank=row.ts_rank,
+        region_ts_rank=row.region_ts_rank,
         skills_driver=row.skills_driver,
         skills_prog=row.skills_prog,
         skills_total=row.skills_total,

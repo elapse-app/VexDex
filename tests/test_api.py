@@ -165,6 +165,35 @@ def test_trend_endpoint_orders_chronologically(client):
     assert [p["opr"] for p in points] == [10.0, 20.0]
 
 
+def test_team_response_includes_region_ts_rank(client):
+    tc, api, db, Event, TeamStats = client
+    engine = api.engine
+
+    team_1 = TeamStats(team_id=1, team_num="1A", total_matches=1, qual_matches=1, ts=20.0)
+    team_2 = TeamStats(team_id=2, team_num="2A", total_matches=1, qual_matches=1, ts=15.0)
+    db.record_event_results(engine, _event(1), [team_1, team_2])
+
+    from team_profile import TeamProfile
+
+    db.record_team_profiles(
+        engine,
+        [
+            TeamProfile(team_id=1, team_num="1A", team_name="A", grade="High School", region="TX"),
+            TeamProfile(team_id=2, team_num="2A", team_name="B", grade="High School", region="TX"),
+        ],
+    )
+    db.refresh_team_season_summary(engine, 190)
+
+    resp = tc.get("/api/v1/seasons/190/teams/1")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "region_ts_rank" in body
+    assert body["region_ts_rank"] == 1  # team 1 has higher ts_exposed within TX
+
+    resp2 = tc.get("/api/v1/seasons/190/teams/2")
+    assert resp2.json()["region_ts_rank"] == 2
+
+
 def test_data_endpoint_requires_a_token(client):
     tc, api, db, Event, TeamStats = client
     from fastapi.testclient import TestClient

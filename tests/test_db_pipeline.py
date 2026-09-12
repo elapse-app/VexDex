@@ -144,13 +144,17 @@ def test_refresh_team_season_summary_computes_skills_and_qualification_ranks(eng
     team_1.skills_driver, team_1.skills_prog = 40, 20  # total 60
     team_1.awards = [("Excellence Award", ["World Championship"])]
 
-    # Team 2: lower skills score, no qualification.
+    # Team 2: lower skills score, no qualification. Lower TrueSkill than team 3.
     team_2 = TeamStats(team_id=2, team_num="200A", total_matches=1, qual_matches=1)
     team_2.skills_driver, team_2.skills_prog = 30, 10  # total 40
+    team_2.ts = 15.0
 
     # Team 3: same region as team 2, higher skills than team 2 but no quals.
+    # Higher TrueSkill than team 2, so region_ts_rank should invert their
+    # skills_region_rank ordering.
     team_3 = TeamStats(team_id=3, team_num="300A", total_matches=1, qual_matches=1)
     team_3.skills_driver, team_3.skills_prog = 35, 10  # total 45
+    team_3.ts = 20.0
 
     db.record_event_results(engine, event, [team_1, team_2, team_3])
     db.record_team_profiles(
@@ -183,6 +187,13 @@ def test_refresh_team_season_summary_computes_skills_and_qualification_ranks(eng
     # Region rank within TX: team 3 (45) beats team 2 (40).
     assert rows[3].skills_region_rank == 1
     assert rows[2].skills_region_rank == 2
+
+    # Region TrueSkill rank within TX: team 3 (ts=20.0) beats team 2 (ts=15.0)
+    # — same ordering here, but computed independently from skills_region_rank.
+    assert rows[3].region_ts_rank == 1
+    assert rows[2].region_ts_rank == 2
+    # Team 1 is alone in region CA, so it's rank 1 within its own region.
+    assert rows[1].region_ts_rank == 1
 
     # Qualification flags.
     assert rows[1].qualed_worlds is True

@@ -201,6 +201,7 @@ class TeamSeasonSummaryRecord(Base):
     ts_sigma: Mapped[float] = mapped_column(Float, default=0.0)
     ts_exposed: Mapped[float] = mapped_column(Float, default=0.0)
     ts_rank: Mapped[int] = mapped_column(Integer, default=0)
+    region_ts_rank: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     # Season-best skills performance: the single event where driver+programming
     # combined was highest (VEX's own skills ranking convention — not summed
@@ -492,6 +493,7 @@ def refresh_team_season_summary(engine: Engine, season_id: int) -> int:
             regions[team_id] = region
 
         _assign_skills_ranks(summaries, skills_totals, regions)
+        _assign_region_ts_ranks(summaries, regions)
         _assign_percentiles_and_pick_list(summaries)
 
         for summary in summaries.values():
@@ -542,6 +544,33 @@ def _assign_skills_ranks(
         summaries[team_id].unqualed_regionals_skills_region_rank = (
             unqualed_regionals_region_ranks.get(team_id)
         )
+
+
+def _assign_region_ts_ranks(
+    summaries: dict[int, TeamSeasonSummaryRecord],
+    regions: dict[int, str | None],
+) -> None:
+    """Rank teams by ts_exposed within each team's region. Mirrors
+    _assign_skills_ranks's region-partitioning, but keyed on TrueSkill
+    exposure (already populated on summaries[team_id].ts_exposed from the
+    team's most recently processed event) instead of season-best skills.
+    No global variant here — ts_rank already serves as the global rank."""
+
+    def ranked(team_ids: list[int]) -> dict[int, int]:
+        ordered = sorted(team_ids, key=lambda t: (-summaries[t].ts_exposed, summaries[t].team_num))
+        return {team_id: i + 1 for i, team_id in enumerate(ordered)}
+
+    by_region: dict[str, list[int]] = defaultdict(list)
+    for team_id, region in regions.items():
+        if region:
+            by_region[region].append(team_id)
+
+    region_ranks: dict[int, int] = {}
+    for region_teams in by_region.values():
+        region_ranks.update(ranked(region_teams))
+
+    for team_id in summaries:
+        summaries[team_id].region_ts_rank = region_ranks.get(team_id)
 
 
 def _percentiles(values: dict[int, float]) -> dict[int, float]:
