@@ -11,7 +11,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
-from sqlalchemy import desc, func, select
+from sqlalchemy import desc, func, or_, select
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
@@ -401,9 +401,10 @@ def list_current_teams(
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     sort: str = Query(default="ts", pattern="^(ts|pick_list|ccwm|opr)$"),
+    search: str | None = Query(default=None, min_length=1, max_length=64),
 ) -> TeamLeaderboardResponse:
     return list_teams_for_season(
-        _require_latest_season_id(db), db, limit=limit, offset=offset, sort=sort
+        _require_latest_season_id(db), db, limit=limit, offset=offset, sort=sort, search=search
     )
 
 
@@ -456,18 +457,35 @@ def list_teams_for_season(
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     sort: str = Query(default="ts", pattern="^(ts|pick_list|ccwm|opr)$"),
+    search: str | None = Query(default=None, min_length=1, max_length=64),
 ) -> TeamLeaderboardResponse:
-    total = db.execute(
-        select(func.count())
-        .select_from(TeamSeasonSummaryRecord)
-        .where(TeamSeasonSummaryRecord.season_id == season_id)
-    ).scalar_one()
-
-    rows = db.execute(
+    query = (
         select(TeamSeasonSummaryRecord, TeamRecord)
         .join(TeamRecord, TeamRecord.team_id == TeamSeasonSummaryRecord.team_id)
         .where(TeamSeasonSummaryRecord.season_id == season_id)
-        .order_by(*_LEADERBOARD_SORTS[sort], TeamSeasonSummaryRecord.team_num.asc())
+    )
+    count_query = (
+        select(func.count())
+        .select_from(TeamSeasonSummaryRecord)
+        .join(TeamRecord, TeamRecord.team_id == TeamSeasonSummaryRecord.team_id)
+        .where(TeamSeasonSummaryRecord.season_id == season_id)
+    )
+    if search:
+        # Case-insensitive partial match on team number or name — restores
+        # the name-search capability the old vrc-data-analysis.com ("VDA")
+        # integration had, which elapse's team search fell back to before
+        # VexDex existed.
+        pattern = f"%{search}%"
+        search_filter = or_(
+            TeamSeasonSummaryRecord.team_num.ilike(pattern),
+            TeamRecord.team_name.ilike(pattern),
+        )
+        query = query.where(search_filter)
+        count_query = count_query.where(search_filter)
+
+    total = db.execute(count_query).scalar_one()
+    rows = db.execute(
+        query.order_by(*_LEADERBOARD_SORTS[sort], TeamSeasonSummaryRecord.team_num.asc())
         .offset(offset)
         .limit(limit)
     ).all()

@@ -118,7 +118,7 @@ Available endpoints (all except `/health` require a bearer token — see
 - `GET /api/v1/teams/{team_id}`
 - `GET /api/v1/teams/by-number/{team_num}`
 - `GET /api/v1/seasons`
-- `GET /api/v1/seasons/{season_id}/teams?limit=100&offset=0&sort=ts` — `sort` is one of `ts` (default), `pick_list`, `ccwm`, `opr`
+- `GET /api/v1/seasons/{season_id}/teams?limit=100&offset=0&sort=ts&search=` — `sort` is one of `ts` (default), `pick_list`, `ccwm`, `opr`; `search` (optional) case-insensitively matches teams whose number or name contains the given substring
 - `GET /api/v1/seasons/{season_id}/teams/{team_id}`
 - `GET /api/v1/seasons/{season_id}/teams/by-number/{team_num}`
 - `GET /api/v1/seasons/{season_id}/teams/{team_id}/trend` — every event this team competed in this season, chronologically, with OPR/DPR/CCWM/SOS/TrueSkill at each point

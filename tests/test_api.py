@@ -194,6 +194,73 @@ def test_team_response_includes_region_ts_rank(client):
     assert resp2.json()["region_ts_rank"] == 2
 
 
+def test_teams_search_matches_partial_team_number(client):
+    tc, api, db, Event, TeamStats = client
+    engine = api.engine
+
+    db.record_event_results(
+        engine,
+        _event(1),
+        [
+            TeamStats(team_id=1, team_num="90241A", total_matches=1, qual_matches=1),
+            TeamStats(team_id=2, team_num="12141A", total_matches=1, qual_matches=1),
+        ],
+    )
+    db.refresh_team_season_summary(engine, 190)
+
+    resp = tc.get("/api/v1/seasons/190/teams", params={"search": "0241"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["total"] == 1
+    assert [item["team_num"] for item in body["items"]] == ["90241A"]
+
+
+def test_teams_search_matches_partial_team_name_case_insensitively(client):
+    tc, api, db, Event, TeamStats = client
+    engine = api.engine
+
+    from team_profile import TeamProfile
+
+    db.record_event_results(
+        engine,
+        _event(1),
+        [
+            TeamStats(team_id=1, team_num="1A", total_matches=1, qual_matches=1),
+            TeamStats(team_id=2, team_num="2A", total_matches=1, qual_matches=1),
+        ],
+    )
+    db.record_team_profiles(
+        engine,
+        [
+            TeamProfile(team_id=1, team_num="1A", team_name="Rushdown Robotics", grade="High School", region="ON"),
+            TeamProfile(team_id=2, team_num="2A", team_name="Checkmate", grade="High School", region="ON"),
+        ],
+    )
+    db.refresh_team_season_summary(engine, 190)
+
+    resp = tc.get("/api/v1/seasons/190/teams", params={"search": "rushDOWN"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["total"] == 1
+    assert body["items"][0]["team_name"] == "Rushdown Robotics"
+
+
+def test_teams_search_with_no_matches_returns_empty(client):
+    tc, api, db, Event, TeamStats = client
+    engine = api.engine
+
+    db.record_event_results(
+        engine, _event(1), [TeamStats(team_id=1, team_num="1A", total_matches=1, qual_matches=1)]
+    )
+    db.refresh_team_season_summary(engine, 190)
+
+    resp = tc.get("/api/v1/seasons/190/teams", params={"search": "zzz_no_such_team"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["total"] == 0
+    assert body["items"] == []
+
+
 def test_data_endpoint_requires_a_token(client):
     tc, api, db, Event, TeamStats = client
     from fastapi.testclient import TestClient
