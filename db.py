@@ -521,6 +521,7 @@ def refresh_team_season_summary(engine: Engine, season_id: int) -> int:
             regions[team_id] = region
 
         _assign_skills_ranks(summaries, skills_totals, regions)
+        _assign_ts_ranks(summaries)
         _assign_region_ts_ranks(summaries, regions)
         _assign_percentiles_and_pick_list(summaries)
 
@@ -574,6 +575,24 @@ def _assign_skills_ranks(
         )
 
 
+def _assign_ts_ranks(summaries: dict[int, TeamSeasonSummaryRecord]) -> None:
+    """Overwrite ts_rank with a proper season-wide dense rank by ts_exposed,
+    descending. The per-event ts_rank stat.ts_rank captures (a snapshot of
+    the module-global `ratings` leaderboard in tournament_stats.py, taken
+    whenever that team's most recent event happened to be processed) is not
+    a reliable final ranking: it's relative to whatever subset of teams had
+    already been rated at that moment, so unrelated teams can tie at rank 1,
+    and a team calc_ts() never touched keeps ts_rank at its 0 default —
+    which then sorts first (not last) under `ts_rank.asc()`. Recomputing it
+    here, after every team's final ts_exposed for the season is known, keeps
+    the "sort by TrueSkill" leaderboard (_leaderboard_sort_clauses' "ts"
+    sort) consistent with ts_exposed order."""
+
+    ordered = sorted(summaries, key=lambda t: (-summaries[t].ts_exposed, summaries[t].team_num))
+    for i, team_id in enumerate(ordered):
+        summaries[team_id].ts_rank = i + 1
+
+
 def _assign_region_ts_ranks(
     summaries: dict[int, TeamSeasonSummaryRecord],
     regions: dict[int, str | None],
@@ -581,8 +600,7 @@ def _assign_region_ts_ranks(
     """Rank teams by ts_exposed within each team's region. Mirrors
     _assign_skills_ranks's region-partitioning, but keyed on TrueSkill
     exposure (already populated on summaries[team_id].ts_exposed from the
-    team's most recently processed event) instead of season-best skills.
-    No global variant here — ts_rank already serves as the global rank."""
+    team's most recently processed event) instead of season-best skills."""
 
     def ranked(team_ids: list[int]) -> dict[int, int]:
         ordered = sorted(team_ids, key=lambda t: (-summaries[t].ts_exposed, summaries[t].team_num))

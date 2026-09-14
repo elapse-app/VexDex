@@ -113,6 +113,43 @@ def test_refresh_team_season_summary_aggregates_across_events(engine):
     assert row.ts_rank == 1
 
 
+def test_refresh_team_season_summary_recomputes_ts_rank_globally(engine):
+    """A team whose event was never scored by the TrueSkill leaderboard loop
+    (tournament_stats.process_matches' `ratings` accumulation can miss a team
+    for reasons unrelated to whether they actually played — see db.py's
+    _assign_ts_ranks) keeps TeamStats' ts_rank default of 0. Before
+    _assign_ts_ranks existed, that 0 was copied straight onto the summary and
+    then sorted *first* by `ts_rank.asc()` in the leaderboard API, even though
+    the team's real ts_exposed (0.0) put it last. refresh_team_season_summary
+    must recompute ts_rank itself from ts_exposed, ignoring whatever ts_rank
+    the per-event stat happened to carry in."""
+    season_id = 190
+    event = _event(event_id=1, season_id=season_id)
+
+    team_best = TeamStats(team_id=1, team_num="100A", total_matches=5, qual_matches=5, ts=20.0, ts_rank=1)
+    team_mid = TeamStats(team_id=2, team_num="200A", total_matches=5, qual_matches=5, ts=10.0, ts_rank=1)
+    # Simulates a team calc_ts() never rated: real matches played, but the
+    # per-event ts/ts_rank stay at their TeamStats defaults (0.0 / 0).
+    team_unrated = TeamStats(team_id=3, team_num="300A", total_matches=5, qual_matches=5, ts=0.0, ts_rank=0)
+
+    db.record_event_results(engine, event, [team_best, team_mid, team_unrated])
+    db.refresh_team_season_summary(engine, season_id)
+
+    from sqlalchemy.orm import Session
+
+    with Session(engine) as session:
+        rows = {
+            r.team_id: r
+            for r in session.execute(
+                select(db.TeamSeasonSummaryRecord).where(db.TeamSeasonSummaryRecord.season_id == season_id)
+            ).scalars()
+        }
+
+    assert rows[1].ts_rank == 1
+    assert rows[2].ts_rank == 2
+    assert rows[3].ts_rank == 3  # not 0, and not sorted ahead of the rated teams
+
+
 def test_get_latest_season_id_reflects_summarized_seasons(engine):
     assert db.get_latest_season_id(engine) is None
 
