@@ -14,6 +14,7 @@ from pydantic import BaseModel
 from sqlalchemy import desc, func, or_, select
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
+from starlette.middleware.gzip import GZipMiddleware
 
 from db import (
     DatasetRefreshRunRecord,
@@ -30,6 +31,10 @@ from db import (
 )
 
 TeamSeasonRow = TeamSeasonSummaryRecord | TeamSeasonHistoryRecord
+
+# Large enough that a whole season (10k+ teams) is 2-3 requests rather than
+# 20+ COUNT + deep-OFFSET round trips against a small connection pool.
+_MAX_LEADERBOARD_LIMIT = 5000
 
 engine = get_engine()
 # Schema creation is a deploy-time step (Fly `release_command`), not something
@@ -133,6 +138,12 @@ async def cache_and_cache_headers(request: Request, call_next):
     stored.headers["Cache-Control"] = _CACHE_CONTROL
     stored.headers["X-Cache"] = "MISS" if _CACHE_TTL_SECONDS > 0 else "DISABLED"
     return stored
+
+
+# Registered after the cache middleware so it wraps it (Starlette: last added
+# = outermost) and compresses cache HITs too. Full-season leaderboards are
+# multi-MB JSON that shrinks ~10x; Dart's HttpClient decompresses transparently.
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 
 class TeamSeasonResponse(BaseModel):
@@ -411,7 +422,7 @@ def health() -> dict[str, str]:
 @router.get("/api/v1/teams", response_model=TeamLeaderboardResponse)
 def list_current_teams(
     db: DbSession,
-    limit: int = Query(default=100, ge=1, le=500),
+    limit: int = Query(default=100, ge=1, le=_MAX_LEADERBOARD_LIMIT),
     offset: int = Query(default=0, ge=0),
     sort: str = Query(default="ts", pattern="^(ts|pick_list|ccwm|opr)$"),
     search: str | None = Query(default=None, min_length=1, max_length=64),
@@ -472,7 +483,7 @@ def _leaderboard_sort_clauses(model: type[TeamSeasonRow], sort: str) -> tuple:
 def list_teams_for_season(
     season_id: int,
     db: DbSession,
-    limit: int = Query(default=100, ge=1, le=500),
+    limit: int = Query(default=100, ge=1, le=_MAX_LEADERBOARD_LIMIT),
     offset: int = Query(default=0, ge=0),
     sort: str = Query(default="ts", pattern="^(ts|pick_list|ccwm|opr)$"),
     search: str | None = Query(default=None, min_length=1, max_length=64),

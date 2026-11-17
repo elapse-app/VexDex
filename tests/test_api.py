@@ -375,3 +375,29 @@ def test_get_responses_are_cached_but_still_require_a_token(client):
     # A warm cache must not become an auth bypass.
     bare = TestClient(api.app)
     assert bare.get("/api/v1/teams").status_code == 401
+
+
+def test_leaderboard_accepts_large_limit_and_rejects_above_cap(client):
+    tc, api, *_ = client
+
+    assert tc.get("/api/v1/seasons/190/teams?limit=5000").status_code != 422
+    assert tc.get("/api/v1/seasons/190/teams?limit=5001").status_code == 422
+
+
+def test_large_responses_are_gzipped_including_cache_hits(client):
+    tc, api, db, Event, TeamStats = client
+
+    teams = [
+        TeamStats(team_id=i, team_num=f"{i}A", total_matches=1, qual_matches=1)
+        for i in range(1, 40)
+    ]
+    db.record_event_results(api.engine, _event(1), teams)
+    db.refresh_team_season_summary(api.engine, 190)
+
+    url = "/api/v1/seasons/190/teams?limit=500"
+    for expected_cache in ("MISS", "HIT"):
+        r = tc.get(url, headers={"Accept-Encoding": "gzip"})
+        assert r.status_code == 200
+        assert r.headers["content-encoding"] == "gzip"
+        assert r.headers["X-Cache"] == expected_cache
+        assert r.json()["total"] == 39
