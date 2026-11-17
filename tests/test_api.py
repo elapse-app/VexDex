@@ -401,3 +401,81 @@ def test_large_responses_are_gzipped_including_cache_hits(client):
         assert r.headers["content-encoding"] == "gzip"
         assert r.headers["X-Cache"] == expected_cache
         assert r.json()["total"] == 39
+
+
+def _seed_leaderboard(api, db, TeamStats, season_id=190, n=3, event_id=1):
+    teams = [
+        TeamStats(team_id=i, team_num=f"{i}A", total_matches=2, qual_matches=2, opr=10.0 * i, ccwm=5.0 * i)
+        for i in range(1, n + 1)
+    ]
+    db.record_event_results(api.engine, _event(event_id, season_id=season_id), teams)
+    db.refresh_team_season_summary(api.engine, season_id)
+
+
+def test_leaderboard_returns_compact_rows_in_ts_rank_order(client):
+    tc, api, db, Event, TeamStats = client
+    _seed_leaderboard(api, db, TeamStats)
+
+    resp = tc.get("/api/v1/seasons/190/leaderboard")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["season_id"] == 190
+    cols = body["columns"]
+    assert cols[:2] == ["team_id", "team_num"] and "ts_exposed" in cols and "region_ts_rank" in cols
+    assert len(body["rows"]) == 3
+    assert all(len(row) == len(cols) for row in body["rows"])
+
+    # Same order as the paged leaderboard's default (ts) sort.
+    paged = tc.get("/api/v1/seasons/190/teams?limit=500").json()["items"]
+    team_id = cols.index("team_id")
+    assert [row[team_id] for row in body["rows"]] == [item["team_id"] for item in paged]
+
+
+def test_leaderboard_etag_revalidation(client):
+    tc, api, db, Event, TeamStats = client
+    _seed_leaderboard(api, db, TeamStats)
+
+    first = tc.get("/api/v1/seasons/190/leaderboard")
+    etag = first.headers["ETag"]
+    assert etag.startswith('W/"190-')
+
+    not_modified = tc.get("/api/v1/seasons/190/leaderboard", headers={"If-None-Match": etag})
+    assert not_modified.status_code == 304
+    assert not_modified.content == b""
+
+    stale = tc.get("/api/v1/seasons/190/leaderboard", headers={"If-None-Match": 'W/"190-stale"'})
+    assert stale.status_code == 200
+    assert stale.json()["rows"]
+
+
+def test_leaderboard_is_precompressed_only_when_accepted(client):
+    tc, api, db, Event, TeamStats = client
+    _seed_leaderboard(api, db, TeamStats, n=40)
+
+    gz = tc.get("/api/v1/seasons/190/leaderboard", headers={"Accept-Encoding": "gzip"})
+    assert gz.headers["content-encoding"] == "gzip"
+    assert len(gz.json()["rows"]) == 40  # TestClient transparently decompresses
+
+    plain = tc.get("/api/v1/seasons/190/leaderboard", headers={"Accept-Encoding": "identity"})
+    assert "content-encoding" not in plain.headers
+    assert len(plain.json()["rows"]) == 40
+
+
+def test_leaderboard_serves_archived_season(client):
+    tc, api, db, Event, TeamStats = client
+    _seed_leaderboard(api, db, TeamStats, season_id=190, n=2)
+    _seed_leaderboard(api, db, TeamStats, season_id=197, n=1, event_id=2)
+    assert db.archive_completed_seasons(api.engine) == 2  # rows moved out of the live table
+
+    assert len(tc.get("/api/v1/seasons/190/leaderboard").json()["rows"]) == 2
+    assert len(tc.get("/api/v1/seasons/197/leaderboard").json()["rows"]) == 1
+
+
+def test_leaderboard_unknown_season_is_404_and_requires_token(client):
+    tc, api, db, Event, TeamStats = client
+    _seed_leaderboard(api, db, TeamStats)
+
+    assert tc.get("/api/v1/seasons/999/leaderboard").status_code == 404
+    from fastapi.testclient import TestClient
+
+    assert TestClient(api.app).get("/api/v1/seasons/190/leaderboard").status_code == 401

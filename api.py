@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import gzip
+import json
 import os
 import time
 from collections import OrderedDict
@@ -103,7 +105,12 @@ def _token_from(request: Request) -> str | None:
 
 @app.middleware("http")
 async def cache_and_cache_headers(request: Request, call_next):
-    if request.method != "GET" or request.url.path in _NO_CACHE_PATHS:
+    if (
+        request.method != "GET"
+        or request.url.path in _NO_CACHE_PATHS
+        # Has its own pre-compressed, version-keyed cache and ETag/304 handling.
+        or request.url.path.endswith("/leaderboard")
+    ):
         return await call_next(request)
 
     key = f"{request.url.path}?{request.url.query}"
@@ -143,7 +150,10 @@ async def cache_and_cache_headers(request: Request, call_next):
 # Registered after the cache middleware so it wraps it (Starlette: last added
 # = outermost) and compresses cache HITs too. Full-season leaderboards are
 # multi-MB JSON that shrinks ~10x; Dart's HttpClient decompresses transparently.
-app.add_middleware(GZipMiddleware, minimum_size=1024)
+# compresslevel 5: about a third of level 9's CPU on this shared-cpu VM, for
+# nearly the same ratio on JSON. Responses that already set Content-Encoding
+# (the pre-compressed /leaderboard) pass through untouched.
+app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)
 
 
 class TeamSeasonResponse(BaseModel):
@@ -522,6 +532,118 @@ def list_teams_for_season(
 
     items = [_to_team_response(row, team) for row, team in rows]
     return TeamLeaderboardResponse(total=total, limit=limit, offset=offset, items=items)
+
+
+# --- Compact whole-season leaderboard -----------------------------------------
+#
+# The Elapse app's World Rankings screen loads every team in a season at once.
+# This endpoint serves exactly that, in one request: only the columns the screen
+# reads, as positional rows. That is far smaller and faster to parse than
+# paging /teams. A body is built and gzipped once per (season, dataset
+# version), and clients revalidate with If-None-Match, so the weekly-changing
+# data is normally answered with a bodyless 304.
+
+_LEADERBOARD_COLUMNS = (
+    "team_id",
+    "team_num",
+    "team_name",
+    "grade",
+    "region",
+    "matches_played",
+    "total_winrate",
+    "opr_avg",
+    "dpr_avg",
+    "ccwm_avg",
+    "ts_exposed",
+    "ts_rank",
+    "region_ts_rank",
+)
+_LEADERBOARD_CACHE_MAX = 8
+_leaderboard_cache_lock = Lock()
+# (season_id, version) -> (raw_json_bytes, gzip_bytes)
+_leaderboard_cache: OrderedDict[tuple[int, str], tuple[bytes, bytes]] = OrderedDict()
+
+
+def _round(value: float | None, digits: int) -> float | None:
+    return None if value is None else round(value, digits)
+
+
+def _build_leaderboard_body(db: DbSession, model: type[TeamSeasonRow], season_id: int, version: str) -> bytes:
+    rows = db.execute(
+        select(
+            model.team_id,
+            model.team_num,
+            TeamRecord.team_name,
+            TeamRecord.grade,
+            TeamRecord.region,
+            model.matches_played,
+            model.total_winrate,
+            model.opr_avg,
+            model.dpr_avg,
+            model.ccwm_avg,
+            model.ts_exposed,
+            model.ts_rank,
+            model.region_ts_rank,
+        )
+        .outerjoin(TeamRecord, TeamRecord.team_id == model.team_id)
+        .where(model.season_id == season_id)
+        .order_by(*_leaderboard_sort_clauses(model, "ts"), model.team_num.asc())
+    ).all()
+    payload = {
+        "season_id": season_id,
+        "version": version,
+        "columns": _LEADERBOARD_COLUMNS,
+        "rows": [
+            [
+                r[0], r[1], r[2], r[3], r[4], r[5],
+                _round(r[6], 4),
+                _round(r[7], 2), _round(r[8], 2), _round(r[9], 2), _round(r[10], 2),
+                r[11], r[12],
+            ]
+            for r in rows
+        ],
+    }
+    return json.dumps(payload, separators=(",", ":")).encode()
+
+
+@router.get("/api/v1/seasons/{season_id}/leaderboard")
+def get_season_leaderboard(season_id: int, request: Request, db: DbSession) -> Response:
+    model = _season_model(db, season_id)
+    last_updated = db.execute(
+        select(func.max(model.updated_at)).where(model.season_id == season_id)
+    ).scalar_one_or_none()
+    if last_updated is None:
+        raise HTTPException(status_code=404, detail="No leaderboard data for this season")
+
+    version = last_updated.isoformat()
+    etag = f'W/"{season_id}-{version}"'
+    headers = {
+        "ETag": etag,
+        # Always revalidate. The 304 below makes that nearly free.
+        "Cache-Control": "private, no-cache",
+        "Vary": "Accept-Encoding",
+    }
+    if etag in {t.strip() for t in request.headers.get("If-None-Match", "").split(",")}:
+        return Response(status_code=304, headers=headers)
+
+    key = (season_id, version)
+    with _leaderboard_cache_lock:
+        cached = _leaderboard_cache.get(key)
+        if cached is not None:
+            _leaderboard_cache.move_to_end(key)
+    if cached is None:
+        raw = _build_leaderboard_body(db, model, season_id, version)
+        cached = (raw, gzip.compress(raw, compresslevel=6))
+        with _leaderboard_cache_lock:
+            _leaderboard_cache[key] = cached
+            while len(_leaderboard_cache) > _LEADERBOARD_CACHE_MAX:
+                _leaderboard_cache.popitem(last=False)
+
+    raw, gz = cached
+    if "gzip" in request.headers.get("Accept-Encoding", "").lower():
+        headers["Content-Encoding"] = "gzip"
+        return Response(content=gz, media_type="application/json", headers=headers)
+    return Response(content=raw, media_type="application/json", headers=headers)
 
 
 @router.get("/api/v1/seasons/{season_id}/teams/{team_id}", response_model=TeamSeasonResponse)
